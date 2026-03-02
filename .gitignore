@@ -1,0 +1,42 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pytest / Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Databases and RAGBox local stores
+chroma_db/
+faiss_db/
+*.db
+*.sqlite
+*.sqlite3
+*.db3
+knowledge_graph/
+
+# Logs
+logs/
+*.log
+
+# Ide and OS files
+.vscode/
+.idea/
+.DS_Store
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Secrets
+.env
+*.env
+.env.local

@@ -1,0 +1,45 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - 'v*'  # Push events to matching v*, i.e. v1.0, v20.15.10
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pypi-publish:
+    name: Build & publish to PyPI
+    runs-on: ubuntu-latest
+    # Trusted Publishers require strict permissions:
+    permissions:
+      id-token: write  # IMPORTANT: mapping to OIDC identity
+      contents: read    
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: 1.7.0
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-root
+
+      - name: Build Source and Wheel distributions
+        run: poetry build
+
+      - name: Publish package distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # The PyPA action uses OIDC by default (no token required).
