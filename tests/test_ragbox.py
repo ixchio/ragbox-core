@@ -9,7 +9,19 @@ from ragbox.models.queries import RAGStrategy
 
 
 @pytest.mark.asyncio
-async def test_ragbox_pipeline(tmp_path: Path):
+@patch("ragbox.utils.llm_clients.LLMAutoDetector.detect")
+async def test_ragbox_pipeline(mock_detect, tmp_path: Path):
+    from ragbox.utils.llm_clients import LLMClient
+
+    class DummyLLM(LLMClient):
+        async def _agenerate(self, prompt, **kwargs):
+            return "mocked answer"
+
+        async def _agenerate_structured(self, prompt, schema, **kwargs):
+            return {"strategy": "vector", "reasoning": "mock"}
+
+    mock_detect.return_value = DummyLLM()
+
     d = tmp_path / "docs"
     d.mkdir()
     (d / "info.txt").write_text("hello 123")
