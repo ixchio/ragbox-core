@@ -4,6 +4,9 @@ version = "1.0.1"
 description = "RAG-in-a-Box: Zero-Configuration Self-Building Agentic RAG System"
 authors = ["Developer <amankumarpandeyin@gmail.com>"]
 readme = "README.md"
+repository = "https://github.com/ixchio/ragbox-core"
+homepage = "https://pypi.org/project/ragbox-core/"
+keywords = ["rag", "llm", "ai", "vector-search", "knowledge-graph", "agentic"]
 packages = [{include = "ragbox"}]
 exclude = ["tests/", "docs/", ".env", "*.db", "chroma_db/", "knowledge_graph/", "logs/"]
 [tool.poetry.scripts]
