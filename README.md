@@ -79,8 +79,8 @@ graph TD
 
 ## Contributing
 
-We welcome contributions to RAGBox-Core! Please see our [CONTRIBUTING.md](https://github.com/ixchio/ragbox-core/blob/main/CONTRIBUTING.md) for details on how to set up your development environment, run the test suite, and submit Pull Requests.
+We welcome contributions to RAGBox-Core! Please see our [CONTRIBUTING.md](https://github.com/ixchio/ragbox-core/blob/master/CONTRIBUTING.md) for details on how to set up your development environment, run the test suite, and submit Pull Requests.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](https://github.com/ixchio/ragbox-core/blob/main/LICENSE) file for details.
+This project is licensed under the MIT License - see the [LICENSE](https://github.com/ixchio/ragbox-core/blob/master/LICENSE) file for details.
