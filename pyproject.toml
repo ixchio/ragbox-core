@@ -46,6 +46,7 @@ python-magic = "*"
 leidenalg = "*"
 python-louvain = "*"
 igraph = "*"
+pydantic-settings = "^2.13.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.0"
