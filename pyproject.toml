@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "ragbox-core"
-version = "1.0.2"
+version = "1.0.4"
 description = "RAG-in-a-Box: Zero-Configuration Self-Building Agentic RAG System"
 authors = ["Developer <amankumarpandeyin@gmail.com>"]
 readme = "README.md"
