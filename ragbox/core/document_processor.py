@@ -8,9 +8,8 @@ from pathlib import Path
 import asyncio
 from loguru import logger
 
-from ragbox.models.documents import (
-    Document, PDFDocument, CodeDocument, DocumentType
-)
+from ragbox.models.documents import Document, PDFDocument, CodeDocument, DocumentType
+
 
 class BaseProcessor(ABC):
     @abstractmethod
@@ -21,10 +20,11 @@ class BaseProcessor(ABC):
 
 class PDFProcessor(BaseProcessor):
     """PDF processor with robust text and basic table extraction."""
+
     async def process(self, path: Path, file_hash: str) -> Optional[PDFDocument]:
         try:
             import pdfplumber
-            
+
             def _extract() -> PDFDocument:
                 text_parts = []
                 page_count = 0
@@ -32,71 +32,85 @@ class PDFProcessor(BaseProcessor):
                     page_count = len(pdf.pages)
                     for i, page in enumerate(pdf.pages):
                         text_parts.append(f"--- Page {i+1} ---")
-                        
+
                         # Extract text
                         page_text = page.extract_text()
                         if page_text:
                             text_parts.append(page_text)
-                            
+
                         # Extract tables (very basic stringification)
                         tables = page.extract_tables()
                         for table in tables:
                             text_parts.append("--- Table Data ---")
                             for row in table:
                                 # Filter out Nones and join with visual separator
-                                cleaned_row = [str(cell).strip() if cell else "" for cell in row]
+                                cleaned_row = [
+                                    str(cell).strip() if cell else "" for cell in row
+                                ]
                                 text_parts.append(" | ".join(cleaned_row))
-                                
+
                 return PDFDocument(
                     id=file_hash,
                     path=path,
                     content="\n".join(text_parts),
-                    page_count=page_count
+                    page_count=page_count,
                 )
+
             return await asyncio.to_thread(_extract)
         except ImportError:
-            logger.error("pdfplumber required for PDF processing. Install with: pip install pdfplumber")
+            logger.error(
+                "pdfplumber required for PDF processing. Install with: pip install pdfplumber"
+            )
             return None
 
 
 class ImageProcessor(BaseProcessor):
     """Extracts text from images using OCR."""
+
     async def process(self, path: Path, file_hash: str) -> Optional[Document]:
         try:
             from paddleocr import PaddleOCR
             import logging
-            
+
             def _extract() -> Document:
                 # Suppress verbose paddleocr logging
                 logging.getLogger("ppocr").setLevel(logging.ERROR)
-                
+
                 # Initialize OCR (use English model by default, limit to CPU to avoid CUDA setup overhead in general use)
-                ocr = PaddleOCR(use_angle_cls=True, lang='en', use_gpu=False, show_log=False)
+                ocr = PaddleOCR(
+                    use_angle_cls=True, lang="en", use_gpu=False, show_log=False
+                )
                 result = ocr.ocr(str(path), cls=True)
-                
+
                 text_parts = []
-                if result and result[0]: # result[0] is the list of lines for the first (and only) image
-                     for line in result[0]:
-                         # line is a tuple: (bounding_box, (text, confidence))
-                         # e.g., ([[x,y], [x,y], [x,y], [x,y]], ('hello world', 0.99))
-                         text, confidence = line[1]
-                         if confidence > 0.6: # Configurable threshold later
+                if (
+                    result and result[0]
+                ):  # result[0] is the list of lines for the first (and only) image
+                    for line in result[0]:
+                        # line is a tuple: (bounding_box, (text, confidence))
+                        # e.g., ([[x,y], [x,y], [x,y], [x,y]], ('hello world', 0.99))
+                        text, confidence = line[1]
+                        if confidence > 0.6:  # Configurable threshold later
                             text_parts.append(text)
-                            
+
                 return Document(
                     id=file_hash,
                     path=path,
                     content="\n".join(text_parts),
-                    doc_type=DocumentType.TEXT
+                    doc_type=DocumentType.TEXT,
                 )
+
             return await asyncio.to_thread(_extract)
         except ImportError:
-            logger.error("paddleocr required for image processing. Install with: pip install paddleocr")
+            logger.error(
+                "paddleocr required for image processing. Install with: pip install paddleocr"
+            )
             return None
 
 
 class PPTXProcessor(BaseProcessor):
     """PowerPoint (.pptx) processor — extracts text from all slides."""
+
     async def process(self, path: Path, file_hash: str) -> Optional[Document]:
         try:
             from pptx import Presentation
@@ -129,42 +143,45 @@ class PPTXProcessor(BaseProcessor):
                     doc_type=DocumentType.STRUCTURED,
                     metadata={"slide_count": len(prs.slides)},
                 )
+
             return await asyncio.to_thread(_extract)
         except ImportError:
-            logger.error("python-pptx required for PPTX processing. Install with: pip install python-pptx")
+            logger.error(
+                "python-pptx required for PPTX processing. Install with: pip install python-pptx"
+            )
             return None
 
 
 class CodeProcessor(BaseProcessor):
     async def process(self, path: Path, file_hash: str) -> Optional[CodeDocument]:
         def _read() -> CodeDocument:
-            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 content = f.read()
             return CodeDocument(
                 id=file_hash,
                 path=path,
                 content=content,
-                language=path.suffix.lstrip('.')
+                language=path.suffix.lstrip("."),
             )
+
         return await asyncio.to_thread(_read)
 
 
 class TextProcessor(BaseProcessor):
     async def process(self, path: Path, file_hash: str) -> Optional[Document]:
         def _read() -> Document:
-            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 content = f.read()
             return Document(
-                id=file_hash,
-                path=path,
-                content=content,
-                doc_type=DocumentType.TEXT
+                id=file_hash, path=path, content=content, doc_type=DocumentType.TEXT
             )
+
         return await asyncio.to_thread(_read)
 
 
 class DocumentProcessorRouter:
     """Routes documents to correct processor automatically."""
+
     def __init__(self):
         self.processors = {
             # Documents
@@ -202,5 +219,7 @@ class DocumentProcessorRouter:
         try:
             return await processor.process(path, file_hash)
         except Exception as e:
-            logger.error(f"Failed to process {path} with {type(processor).__name__}: {e}")
+            logger.error(
+                f"Failed to process {path} with {type(processor).__name__}: {e}"
+            )
             return None
