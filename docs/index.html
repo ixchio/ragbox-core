@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAGBox Core - Official Documentation</title>
+    <meta name="description" content="Official documentation for RAGBox: The Zero-Configuration Self-Building Agentic RAG System.">
+    
+    <!-- Typography -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+    <!-- Minimalist Background Canvas Element for subtle effect -->
+    <canvas id="bg-canvas"></canvas>
+
+    <div class="layout">
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h2>RAGBox</h2>
+                <span class="version">v1.0.5</span>
+            </div>
+            <nav class="nav-menu">
+                <a href="#introduction" class="nav-link active">Introduction</a>
+                <a href="#what-it-does" class="nav-link">What It Does</a>
+                <a href="#why-ragbox" class="nav-link">Why RAGBox?</a>
+                <a href="#use-cases" class="nav-link">Use Cases</a>
+                <a href="#requirements" class="nav-link">Requirements</a>
+                <a href="#installation" class="nav-link">Installation</a>
+                <a href="#setup" class="nav-link">Setup & Quickstart</a>
+                <a href="#architecture" class="nav-link">Core Architecture</a>
+            </nav>
+        </aside>
+
+        <main class="content">
+            <header class="hero">
+                <h1 class="hero-title">RAGBox Core</h1>
+                <p class="hero-subtitle">The Zero-Configuration, Self-Building Agentic RAG System.</p>
+                <div class="hero-divider"></div>
+            </header>
+
+            <section id="introduction" class="doc-section">
+                <h2>Introduction</h2>
+                <p>Welcome to the official documentation for RAGBox. RAGBox is a production-grade, auto-configuring asynchronous engine that abstracts the extreme complexity of modern Retrieval-Augmented Generation. It natively fuses Dense Vector Search, Knowledge Graphs, and Agentic Orchestration into a single, unified pipeline.</p>
+                <p>RAGBox is designed for engineers and data scientists who require high-performance, resilient document intelligence without the monolithic boilerplate of managing disparate stores, chunking algorithms, and LLM routers.</p>
+            </section>
+
+            <section id="what-it-does" class="doc-section">
+                <h2>What It Does</h2>
+                <p>RAGBox autonomously manages the entire lifecycle of document ingestion, semantic indexing, and hybrid retrieval. Specifically, the system performs:</p>
+                <ul class="feature-list">
+                    <li><strong>Self-Healing Infrastructure:</strong> Watchdog daemons monitor a designated directory, parsing and indexing documents incrementally. It utilizes SQLite-backed content-addressed storage (CAS) to prevent amnesia and thwart redundant API costs.</li>
+                    <li><strong>Auto-Document Intelligence:</strong> Natively extracts content from unstructured formats including PDF, PPTX, Images, and Code. Applies OCR and layout analysis automatically.</li>
+                    <li><strong>Self-Optimizing Chunking:</strong> Rather than forcing hardcoded chunk boundaries, the engine dynamically samples data and queries an LLM once per file type to determine the mathematically optimal chunking strategy, mapping this strategy strictly via extension to avoid $O(N)$ token traps.</li>
+                    <li><strong>Agentic Routing:</strong> An orchestration layer intercepts user queries, expands the semantic intent, and routes it across six distinct sub-pipelines (Vector, Graph, Keyword, etc.) executing searches in parallel.</li>
+                    <li><strong>Reciprocal Rank Fusion (RRF):</strong> Results from varied vector topologies and graph queries are fused together, then aggressively pruned and passed into a Cross-Encoder for highly accurate deterministic reranking.</li>
+                </ul>
+            </section>
+
+            <section id="why-ragbox" class="doc-section">
+                <h2>Why RAGBox?</h2>
+                <p>Building a robust RAG system in 2024–2025 is typically an exercise in managing brittle dependencies. Current frameworks require extensive manual intervention to bridge vector stores, knowledge graphs (Neo4j/NetworkX), and language models.</p>
+                <p>We need RAGBox because enterprise document intelligence cannot rely on "weekend project" orchestration. Without RAGBox, teams typically run into:</p>
+                <ul class="feature-list">
+                    <li><strong>Systemic Amnesia:</strong> Re-indexing entire directories upon server restart, resulting in exponential LLM costs.</li>
+                    <li><strong>Concurrency Bottlenecks:</strong> Synchronous cross-encoders locking up the event loop under load.</li>
+                    <li><strong>Schema Hallucinations:</strong> LLMs failing to properly output graph relationships, corrupting Neo4j databases.</li>
+                </ul>
+                <p>RAGBox solves these through deep agentic workflows, strict JSON schema enforcement with self-healing retries, candidate pruning, and non-blocking asynchronous event handling.</p>
+            </section>
+
+            <section id="use-cases" class="doc-section">
+                <h2>Use Cases</h2>
+                <p>RAGBox is built for environments where data velocity is high and structural complexity is dense.</p>
+                <ul class="feature-list">
+                    <li><strong>Financial Auditing:</strong> Ingesting dense SEC 10-K filings, maintaining exact tables through OCR, and mapping entity relations (e.g., subsidiaries, debt structures) via the Knowledge Graph.</li>
+                    <li><strong>Legal Discovery:</strong> Tracking hundreds of dynamic contract revisions incrementally without triggering full re-indexes, allowing exact cross-referencing querying.</li>
+                    <li><strong>Technical Documentation:</strong> Bridging disparate codebases, markdown logs, and architecture diagrams into a single, highly accurate agentic interface that cites its sources.</li>
+                </ul>
+            </section>
+
+            <section id="requirements" class="doc-section">
+                <h2>Requirements</h2>
+                <p>RAGBox is designed to run in a Python 3.11+ environment with native asynchronous support.</p>
+                <div class="code-block">
+                    <pre><code>OS: Linux, macOS, or Windows (WSL recommended)
+Python: >= 3.11
+RAM: Minimum 8GB (16GB recommended for local LLM inference)</code></pre>
+                </div>
+                <p>For advanced OCR and layout parsing, ensure system-level dependencies such as C++ build tools and Tesseract are installed for your OS.</p>
+            </section>
+
+            <section id="installation" class="doc-section">
+                <h2>Installation</h2>
+                <p>RAGBox Core is available on PyPI. Install it using pip or poetry.</p>
+                
+                <h3 class="sub-heading">Using Pip</h3>
+                <div class="code-block">
+                    <pre><code>pip install -U ragbox-core</code></pre>
+                </div>
+
+                <h3 class="sub-heading">Using Poetry</h3>
+                <div class="code-block">
+                    <pre><code>poetry add ragbox-core</code></pre>
+                </div>
+            </section>
+
+            <section id="setup" class="doc-section">
+                <h2>Setup & Quickstart</h2>
+                <p>RAGBox utilizes an auto-detecting environment model. You do not need to construct complex configuration objects; simply supply API keys via environment variables.</p>
+                
+                <h3 class="sub-heading">1. Configure API Keys</h3>
+                <p>Set one of the following environment variables to activate cloud LLM providers. If none are detected, RAGBox will gracefully attempt to fall back to a local quantized GGUF model.</p>
+                <div class="code-block">
+                    <pre><code>export OPENAI_API_KEY="sk-..."
+# OR
+export ANTHROPIC_API_KEY="sk-ant-..."
+# OR
+export GROQ_API_KEY="gsk_..."</code></pre>
+                </div>
+
+                <h3 class="sub-heading">2. Initialize the Engine</h3>
+                <p>A functional RAG pipeline can be started in three lines of code. This will automatically spark the background watchdog daemons and begin processing documents injected into the target directory.</p>
+                <div class="code-block">
+                    <pre><code>from ragbox import RAGBox
+import asyncio
+
+async def main():
+    # Initializes engine, sqlite CAS layer, and background indexing
+    rag = RAGBox(watch_dir="./company-docs")
+    
+    # Send an agentic query through the hybrid router
+    response = await rag.query("Synthesize the revenue metrics from Q3 across our entities.")
+    
+    print(response.answer)
+    for src in response.sources:
+        print(f"Source: {src.document_id} (Score: {src.score})")
+
+if __name__ == "__main__":
+    asyncio.run(main())</code></pre>
+                </div>
+            </section>
+
+            <section id="architecture" class="doc-section">
+                <h2>Core Architecture</h2>
+                <p>RAGBox operates on a multi-layered, fault-tolerant infrastructure designed to decouple ingestion from retrieval.</p>
+                <div class="architecture-grid">
+                    <div class="arch-card">
+                        <h3>1. Ingestion Layer</h3>
+                        <p>Production-grade watchdog implementation with debounce, duplication caching, and batch processing. Backed by an SQLite database indicating file states.</p>
+                    </div>
+                    <div class="arch-card">
+                        <h3>2. Routing & Chunking</h3>
+                        <p>Self-optimizing routines determine the best split boundaries per document type, dramatically reducing $O(N)$ LLM calls while maintaining semantic coherence.</p>
+                    </div>
+                    <div class="arch-card">
+                        <h3>3. Graph Extraction</h3>
+                        <p>Uses strict structured LLM generation with automatic retry circuits to build Leiden-alg derived graph communities via NetworkX without prompt injection risks.</p>
+                    </div>
+                    <div class="arch-card">
+                        <h3>4. Hybrid Retrieval</h3>
+                        <p>Executes Deep Dense search mixed with Graph queries. Re-ranks via Reciprocal Rank Fusion, prunes aggressively, and passes to a Cross-Encoder for final deterministic scoring.</p>
+                    </div>
+                </div>
+            </section>
+
+            <footer class="footer">
+                <p>&copy; 2026 RAGBox Analytics. Architected for Scale.</p>
+            </footer>
+        </main>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
