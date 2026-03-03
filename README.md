@@ -5,6 +5,8 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![CI](https://github.com/ixchio/ragbox-core/actions/workflows/ci.yml/badge.svg)](https://github.com/ixchio/ragbox-core/actions/workflows/ci.yml)
 
+**[📚 Read the Official Documentation](https://ixchio.github.io/ragbox-core/)**
+
 **RAG-in-a-Box: Zero-Configuration Self-Building Agentic RAG System**
 
 RAGBox is a production-ready, auto-configuring, async-first RAG engine that combines Vector Search, Agentic Orchestration, and Graph Retrieval natively.
