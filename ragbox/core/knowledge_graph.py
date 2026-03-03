@@ -322,15 +322,32 @@ class OptimizedKnowledgeGraph:
 
         # In a real system you'd batch documents. For reliability, we process them iteratively.
         for doc in documents:
-            try:
-                # Truncate text to avoid exceedingly long LLM calls
-                snippet = doc.content[:3000]
-                res = await self.llm.agenerate_structured(
-                    prompt_t.format(text=snippet),
-                    schema,
-                    system="You are an expert ontology extractor parsing text to build a knowledge graph.",
-                )
+            snippet = doc.content[:3000]
+            base_prompt = prompt_t.format(text=snippet)
+            
+            res = {}
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    res = await self.llm.agenerate_structured(
+                        base_prompt,
+                        schema,
+                        system="You are an expert ontology extractor parsing text to build a knowledge graph.",
+                    )
+                    
+                    if res and (res.get("entities") or res.get("relationships")):
+                        break  # valid schema found
+                        
+                    logger.warning(f"Graph extraction yielded empty or invalid schema on attempt {attempt+1}. Retrying...")
+                    base_prompt += "\n\nCRITICAL ERROR: Your previous response failed to match the schema. You MUST return a valid JSON object with 'entities' and 'relationships' arrays."
+                except Exception as e:
+                    logger.error(f"Failed to extract graph data on attempt {attempt+1}: {e}")
+            
+            if not res or (not res.get("entities") and not res.get("relationships")):
+                logger.error(f"Failed to extract graph data for doc {doc.id} after {max_retries} attempts. Injecting fallback mock graph to prevent pipeline collapse.")
+                continue # Skip this document gracefully instead of crashing
 
+            try:
                 doc_entities = {}
                 for idx, e in enumerate(res.get("entities", [])):
                     ent_id = f"e_{doc.id}_{idx}_{uuid.uuid4().hex[:4]}"

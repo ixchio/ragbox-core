@@ -336,12 +336,27 @@ class LLMAutoDetector:
             logger.info("Using Groq for LLM.")
             return GroqClient(api_key=groq_key)
 
-        logger.info("Falling back to local LLaMA.")
         local_path = getattr(
             config,
             "local_model_path",
             os.getenv("LOCAL_MODEL_PATH", "models/llama-3.1-8b-instruct.gguf"),
         )
+        
+        if not os.path.exists(local_path):
+            logger.warning(
+                "\n" + "="*80 + "\n"
+                "⚠️  NO API KEYS DETECTED AND LOCAL LLM NOT FOUND! ⚠️\n"
+                "RAGBox tried to fall back to a local model, but the weights are missing.\n"
+                "To unlock the full power of RAGBox, set ONE of the following environment variables:\n"
+                "  - export OPENAI_API_KEY='your-key'\n"
+                "  - export ANTHROPIC_API_KEY='your-key'\n"
+                "  - export GROQ_API_KEY='your-key'\n"
+                f"Alternatively, download a GGUF model and place it at: {local_path}\n"
+                + "="*80
+            )
+        else:
+            logger.info("Falling back to local LLaMA.")
+            
         return LlamaCppClient(model_path=local_path)
 
 

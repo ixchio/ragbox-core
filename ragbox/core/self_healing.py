@@ -23,18 +23,23 @@ class HealthIssue:
 
 
 class ContentAddressedStorage:
-    """Manages document hashes to detect changes without full reprocessing."""
+    """Manages document hashes to detect changes without full reprocessing. Backed by SQLite."""
 
     def __init__(self, storage_path: Path):
-        self.storage_path = storage_path
-        self._state: Dict[str, str] = {}
-        self._load_state()
+        self.storage_path = Path(storage_path)
+        self.storage_path.mkdir(parents=True, exist_ok=True)
+        self.db_path = self.storage_path / "cas_state.db"
+        self._init_db()
 
-    def _load_state(self) -> None:
-        pass
-
-    def _save_state(self) -> None:
-        pass
+    def _init_db(self) -> None:
+        import sqlite3
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS file_hashes (
+                    file_path TEXT PRIMARY KEY,
+                    hash_value TEXT NOT NULL
+                )
+            ''')
 
     def get_hash(self, file_path: Path) -> Optional[str]:
         if not file_path.exists() or not file_path.is_file():
@@ -53,16 +58,26 @@ class ContentAddressedStorage:
         current_hash = self.get_hash(file_path)
         if not current_hash:
             return False
+            
+        import sqlite3
         path_str = str(file_path)
-        if path_str not in self._state or self._state[path_str] != current_hash:
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT hash_value FROM file_hashes WHERE file_path = ?", (path_str,))
+            row = cursor.fetchone()
+            
+        if not row or row[0] != current_hash:
             return True
         return False
 
     def update(self, file_path: Path) -> str:
         new_hash = self.get_hash(file_path)
         if new_hash:
-            self._state[str(file_path)] = new_hash
-            self._save_state()
+            import sqlite3
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO file_hashes (file_path, hash_value) VALUES (?, ?)",
+                    (str(file_path), new_hash)
+                )
             return new_hash
         return ""
 

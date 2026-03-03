@@ -76,18 +76,16 @@ class RAGBox:
         self._ensure_built()
 
     def _ensure_built(self) -> None:
-        """Synchronously trigger the build process to guarantee readiness."""
+        """Start the build process without blocking the main thread."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+            logger.warning("RAGBox initialized outside an active event loop. Build delayed until queried.")
+            return
 
-        if loop.is_running():
-            asyncio.create_task(self.self_healer.initial_build())
-        else:
-            loop.run_until_complete(self.self_healer.initial_build())
-
+        # Fire and forget the initial build in the background
+        asyncio.create_task(self.self_healer.initial_build())
+        
         # Start watchdog
         self.self_healer.start_watchdog()
 

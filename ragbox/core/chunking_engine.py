@@ -98,21 +98,28 @@ class SelfOptimizingChunker:
             "fixed_large": FixedChunker(chunk_size=1500, overlap=300),
             "sentence": SentenceChunker(max_sentences=8),
         }
+        self._cached_strategies = {}
 
     async def optimize(self, documents: List[Document]) -> ChunkingStrategy:
-        """Auto-evaluates which strategy is best by sampling."""
+        """Auto-evaluates which strategy is best by sampling. Caches per file extension."""
         if not documents:
             return self.strategies["fixed_large"]
 
-        # Sample document
         sample_doc = documents[0]
+        ext = sample_doc.path.suffix.lower()
+        
+        # Fast path: use cached strategy for this extension
+        if ext in self._cached_strategies:
+            logger.debug(f"Using cached chunking strategy '{self._cached_strategies[ext]}' for '{ext}'")
+            return self.strategies[self._cached_strategies[ext]]
+
         # Only sample first 5000 chars to save tokens
         sample_doc_truncated = Document(
             id="sample", path=sample_doc.path, content=sample_doc.content[:5000]
         )
 
         logger.debug(
-            f"Auto-optimizing chunking strategy based on {sample_doc.path.name}..."
+            f"Evaluating optimal chunking strategy for extension '{ext}' based on {sample_doc.path.name}..."
         )
 
         # Test strategies
@@ -149,12 +156,14 @@ class SelfOptimizingChunker:
                 evaluations[name] = 5
 
         if not evaluations:
+            self._cached_strategies[ext] = "fixed_large"
             return self.strategies["fixed_large"]
 
         best_strategy_name = max(evaluations, key=evaluations.get)
         logger.info(
-            f"Auto-Optimized Chunking: Selected '{best_strategy_name}' (Scores: {evaluations})"
+            f"Auto-Optimized Chunking for '{ext}': Selected '{best_strategy_name}' (Scores: {evaluations})"
         )
+        self._cached_strategies[ext] = best_strategy_name
         return self.strategies[best_strategy_name]
 
 

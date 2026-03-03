@@ -47,8 +47,11 @@ class RetrievalFusionEngine:
         merged = self._rrf(vector_results, graph_results, k=60)
 
         # 4. Cross-Encoder Reranking
-        # We pass the top N from RRF into the slow/accurate Cross-Encoder
-        reranked = await self.reranker.rerank(query, merged, top_k=top_k)
+        # Prune the RRF candidate pool BEFORE expensive reranking. 
+        # The CrossEncoder is O(N) and CPU-heavy. We only need to rerank the absolute top candidates.
+        pruned_candidates = merged[:max(15, top_k * 3)]
+        
+        reranked = await self.reranker.rerank(query, pruned_candidates, top_k=top_k)
 
         # Return top_k wrapped in Source objects
         sources = []

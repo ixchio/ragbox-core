@@ -17,6 +17,18 @@ pip install ragbox
 
 > **Note on Dependencies:** Advanced document processing features like OCR and complex PDF parsing require system-level dependencies. Depending on your OS, you may need to install standard C++ build tools or Tesseract for `paddleocr` and `pdfplumber` to function optimally.
 
+## Configuration (API Keys)
+
+RAGBox auto-detects cloud providers. For the best experience, set one of the following environment variables before running:
+```bash
+export OPENAI_API_KEY="sk-..."
+# OR
+export ANTHROPIC_API_KEY="sk-ant-..."
+# OR
+export GROQ_API_KEY="gsk_..."
+```
+If no keys are found, RAGBox falls back to a local LLaMA model (requires manual model download to `models/llama-3.1-8b-instruct.gguf`).
+
 ## Quick Start (3-Line API)
 
 ```python
