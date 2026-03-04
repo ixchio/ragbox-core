@@ -1,13 +1,13 @@
 [tool.poetry]
 name = "ragbox-core"
 version = "2.0.0"
-description = "The RAG framework for people who don't want to think about RAG"
+description = "RAG in 3 lines. Auto-GraphRAG, auto-reranking, auto-streaming. No LangChain required."
 authors = ["Developer <amankumarpandeyin@gmail.com>"]
 readme = "README.md"
 repository = "https://github.com/ixchio/ragbox-core"
 documentation = "https://ixchio.github.io/ragbox-core/"
 homepage = "https://pypi.org/project/ragbox-core/"
-keywords = ["rag", "llm", "ai", "vector-search", "knowledge-graph", "agentic", "graphrag"]
+keywords = ["rag", "llm", "ai", "vector-search", "knowledge-graph", "graphrag", "langchain-alternative", "llamaindex-alternative", "retrieval-augmented-generation", "minimal-rag"]
 packages = [{include = "ragbox"}]
 exclude = ["tests/", "docs/", "benchmarks/", ".env", "*.db", "chroma_db/", "knowledge_graph/", "logs/"]
 

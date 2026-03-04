@@ -323,6 +323,7 @@ class OptimizedKnowledgeGraph:
         # Cache directory for extracted graphs
         import json
         import hashlib
+
         cache_dir = Path(".ragbox_state/graph_cache")
         cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -330,7 +331,7 @@ class OptimizedKnowledgeGraph:
             # Check cache first
             doc_hash = hashlib.md5(doc.content.encode()).hexdigest()
             cache_file = cache_dir / f"{doc.id}_{doc_hash}.json"
-            
+
             if cache_file.exists():
                 logger.info(f"Loading graph extraction for {doc.id} from cache")
                 try:
@@ -340,7 +341,7 @@ class OptimizedKnowledgeGraph:
             else:
                 snippet = doc.content[:3000]
                 base_prompt = prompt_t.format(text=snippet)
-    
+
                 res = {}
                 max_retries = 3
                 for attempt in range(max_retries):
@@ -350,20 +351,22 @@ class OptimizedKnowledgeGraph:
                             schema,
                             system="You are an expert ontology extractor parsing text to build a knowledge graph.",
                         )
-    
+
                         if res and (res.get("entities") or res.get("relationships")):
                             # Save to cache
                             try:
                                 cache_file.write_text(json.dumps(res))
                             except Exception as e:
-                                logger.warning(f"Failed to write cache for {doc.id}: {e}")
+                                logger.warning(
+                                    f"Failed to write cache for {doc.id}: {e}"
+                                )
                             break  # valid schema found
-    
+
                         logger.warning(
                             f"Graph extraction yielded empty or invalid schema on attempt {attempt+1}. Retrying..."
                         )
                         base_prompt += "\n\nCRITICAL ERROR: Your previous response failed to match the schema. You MUST return a valid JSON object with 'entities' and 'relationships' arrays."
-                        await asyncio.sleep(2) # Backoff
+                        await asyncio.sleep(2)  # Backoff
                     except Exception as e:
                         logger.error(
                             f"Failed to extract graph data on attempt {attempt+1}: {e}"
