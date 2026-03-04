@@ -76,7 +76,6 @@ class SentenceTransformerProvider(EmbeddingProvider):
             # Get raw token sequence and embeddings for the full document
             # Note: We truncate context to the model's max window (e.g., 512 for MiniLM) to prevent OOM
             # For a production system this would use a sliding window over the document.
-            max_seq = self._model.max_seq_length
 
             # Since SentenceTransformers natively handles pooling internally for `encode`,
             # writing a mathematically pure late chunker requires dropping down to PyTorch/HuggingFace.

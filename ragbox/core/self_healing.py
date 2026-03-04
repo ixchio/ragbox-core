@@ -6,13 +6,13 @@ import os
 import hashlib
 import asyncio
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Set
+from typing import Dict, Any, Optional
 from collections import deque
 import time
 from dataclasses import dataclass
 from loguru import logger
 from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler, FileModifiedEvent
+from watchdog.events import FileSystemEventHandler
 
 
 class HealthIssue:

@@ -60,7 +60,7 @@ def init(
         with console.status(
             "[bold green]Building Vector Store and Knowledge Graph...", spinner="dots"
         ):
-            rg = rg_pre  # It's already built by the init above
+            pass  # It's already built by the init above
         console.print(
             "[bold green]✓ Indexing complete.[/bold green] RAGBox is ready for queries."
         )

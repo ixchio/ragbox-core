@@ -6,7 +6,7 @@ Provides the public RAGBox class for one-line integrations.
 """
 import asyncio
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, Optional
+from typing import AsyncIterator, Optional
 
 from loguru import logger
 
@@ -88,7 +88,7 @@ class RAGBox:
     def _ensure_built(self) -> None:
         """Start the build process without blocking the main thread."""
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
         except RuntimeError:
             logger.warning(
                 "RAGBox initialized outside an active event loop. Build delayed until queried."

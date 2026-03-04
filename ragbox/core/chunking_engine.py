@@ -3,7 +3,7 @@ Layer 3: SELF-OPTIMIZING CHUNKING
 Configures and dispatches optimal chunking strategy.
 """
 from abc import ABC, abstractmethod
-from typing import List, Any
+from typing import List
 import hashlib
 from loguru import logger
 import asyncio

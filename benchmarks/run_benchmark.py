@@ -327,8 +327,6 @@ async def run_ragbox_benchmark(doc_dir: Path, scorer: SemanticScorer) -> List[Di
     original_extract = rag.knowledge_graph._extract_graph_data
 
     async def mock_extract(documents):
-        from ragbox.models.graph import Entity, Relation
-
         return [], []  # Empty graph to bypass limits
 
     rag.knowledge_graph._extract_graph_data = mock_extract

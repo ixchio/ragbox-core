@@ -1,7 +1,11 @@
 """
-Token tracking and cost estimation for API usage.
+Token tracking, cost estimation, and circuit breaking for API usage.
 """
-from typing import List
+import time
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional
+
 from loguru import logger
 
 
@@ -14,7 +18,10 @@ class CostEstimate:
         self.total_cost_usd = cost_usd
 
     def __str__(self) -> str:
-        return f"Approx ${(self.total_cost_usd):.4f} ({self.input_tokens} in / {self.output_tokens} out)"
+        return (
+            f"Approx ${self.total_cost_usd:.4f} "
+            f"({self.input_tokens} in / {self.output_tokens} out)"
+        )
 
 
 class CostEstimator:
@@ -38,15 +45,12 @@ class CostEstimator:
         try:
             import tiktoken
 
-            # Fallback encoding if model not found
-            self.encoding = tiktoken.encoding_for_model(model_name)
-        except Exception:
             try:
-                import tiktoken
-
+                self.encoding = tiktoken.encoding_for_model(model_name)
+            except Exception:
                 self.encoding = tiktoken.get_encoding("cl100k_base")
-            except ImportError:
-                self.encoding = None
+        except ImportError:
+            self.encoding = None
 
     def count_tokens(self, text: str) -> int:
         if not text:
@@ -67,18 +71,9 @@ class CostEstimator:
     ) -> CostEstimate:
         input_tokens = self.count_tokens(prompt)
         pricing = self.PRICING.get(self.model_name, self.PRICING["local"])
-
         in_cost = (input_tokens / 1_000_000) * pricing["input"]
         out_cost = (approx_output_tokens / 1_000_000) * pricing["output"]
-
         return CostEstimate(input_tokens, approx_output_tokens, in_cost + out_cost)
-
-
-from dataclasses import dataclass
-from typing import Dict, Optional, Callable, Any
-import time
-from enum import Enum
-from loguru import logger
 
 
 class CircuitState(Enum):
@@ -93,8 +88,6 @@ class CostBudget:
     max_query_cost: float = 0.50  # USD per query
     max_concurrent_queries: int = 10
     warning_threshold: float = 0.8  # 80% of budget
-
-    # Circuit breaker settings
     failure_threshold: int = 5  # Open after 5 failures
     recovery_timeout: int = 60  # Try again after 60s
     half_open_max_calls: int = 3  # Test with 3 calls
@@ -111,18 +104,13 @@ class CostCircuitBreaker:
         self.daily_cost = 0.0
         self.daily_cost_reset = time.time()
         self.concurrent_queries = 0
-
-        # Circuit breaker state
         self.state = CircuitState.CLOSED
         self.failure_count = 0
-        self.last_failure_time = 0
+        self.last_failure_time = 0.0
         self.success_count = 0
-
-        # Tracking
         self.query_costs: Dict[str, float] = {}
 
     def _reset_daily_budget(self) -> None:
-        """Reset daily budget every 24 hours"""
         if time.time() - self.daily_cost_reset > 86400:
             self.daily_cost = 0.0
             self.daily_cost_reset = time.time()
@@ -134,12 +122,9 @@ class CostCircuitBreaker:
         estimated_cost: float,
         operation_name: str = "unknown",
     ) -> Optional[Any]:
-        """
-        Execute operation with cost and circuit protection
-        """
+        """Execute operation with cost and circuit protection."""
         self._reset_daily_budget()
 
-        # Check circuit state
         if self.state == CircuitState.OPEN:
             if time.time() - self.last_failure_time > self.budget.recovery_timeout:
                 logger.info("Circuit entering half-open state")
@@ -149,71 +134,55 @@ class CostCircuitBreaker:
             else:
                 raise CircuitBreakerOpen(
                     f"Circuit open for {operation_name}. "
-                    f"Retry after {self.budget.recovery_timeout}s"
+                    f"Retry after {self.budget.recovery_timeout}s."
                 )
 
-        # Check daily budget
         if self.daily_cost >= self.budget.max_daily_cost:
             raise BudgetExceeded(
                 f"Daily budget ${self.budget.max_daily_cost} exceeded. "
                 f"Current: ${self.daily_cost:.2f}"
             )
 
-        # Check per-query budget
         if estimated_cost > self.budget.max_query_cost:
             raise QueryTooExpensive(
                 f"Query cost ${estimated_cost:.2f} exceeds max "
                 f"${self.budget.max_query_cost:.2f}"
             )
 
-        # Check concurrent limit
         if self.concurrent_queries >= self.budget.max_concurrent_queries:
             raise TooManyConcurrentQueries(
                 f"Max {self.budget.max_concurrent_queries} concurrent queries"
             )
 
-        # Execute with tracking
         self.concurrent_queries += 1
-        start_time = time.time()
-
         try:
             result = await operation()
 
-            # Success - update circuit
             if self.state == CircuitState.HALF_OPEN:
                 self.success_count += 1
                 if self.success_count >= self.budget.half_open_max_calls:
-                    logger.info("Circuit closed - recovery successful")
+                    logger.info("Circuit closed — recovery successful")
                     self.state = CircuitState.CLOSED
             else:
                 self.failure_count = max(0, self.failure_count - 1)
 
-            # Track cost
-            actual_cost = estimated_cost  # In reality, calculate from tokens
-            self.daily_cost += actual_cost
+            self.daily_cost += estimated_cost
             self.query_costs[operation_name] = (
-                self.query_costs.get(operation_name, 0) + actual_cost
+                self.query_costs.get(operation_name, 0) + estimated_cost
             )
 
-            # Warning at 80%
-            if (
-                self.daily_cost / self.budget.max_daily_cost
-                > self.budget.warning_threshold
-            ):
-                logger.warning(
-                    f"Daily budget at {self.daily_cost/self.budget.max_daily_cost*100:.1f}%"
-                )
+            usage_pct = self.daily_cost / self.budget.max_daily_cost
+            if usage_pct > self.budget.warning_threshold:
+                logger.warning(f"Daily budget at {usage_pct * 100:.1f}%")
 
             return result
 
-        except Exception as e:
+        except Exception:
             self.failure_count += 1
             self.last_failure_time = time.time()
-
             if self.failure_count >= self.budget.failure_threshold:
                 logger.error(f"Circuit opened due to {self.failure_count} failures")
                 self.state = CircuitState.OPEN
-
             raise
 
         finally:

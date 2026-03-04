@@ -6,7 +6,6 @@ from typing import List, Tuple, Dict, Any, Set, Optional
 import asyncio
 from loguru import logger
 import networkx as nx
-from collections import defaultdict
 import uuid
 import igraph as ig
 import leidenalg

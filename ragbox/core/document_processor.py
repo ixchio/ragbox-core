@@ -3,7 +3,7 @@ Layer 2: AUTO-DOCUMENT INTELLIGENCE
 MIME detection, smart parsing, and structural extraction.
 """
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any, List
+from typing import Optional
 from pathlib import Path
 import asyncio
 from loguru import logger

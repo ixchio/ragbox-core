@@ -4,7 +4,7 @@ Defines Pydantic models for various document types.
 """
 from enum import Enum
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from pydantic import BaseModel, ConfigDict, Field
 
 

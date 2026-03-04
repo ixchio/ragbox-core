@@ -4,15 +4,13 @@ RAGBox Integration Test Suite — Real tests, no mocks.
 Tests cover: ingestion, chunking, vector store, knowledge graph,
 retrieval fusion, reranker, self-healing, cost estimation, and routing.
 """
-import os
-import asyncio
 import time
 import pytest
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 from ragbox.core.chunking_engine import FixedChunker, SentenceChunker
-from ragbox.core.document_processor import DocumentProcessorRouter, TextProcessor
+from ragbox.core.document_processor import DocumentProcessorRouter
 from ragbox.core.reranker import CrossEncoderReranker
 from ragbox.core.self_healing import ContentAddressedStorage, ProductionFileWatcher
 from ragbox.models.documents import Document, DocumentType
@@ -309,7 +307,7 @@ def test_watchdog_debounce_and_dedup():
     # Simulate rapid events for the same file
     from watchdog.events import FileModifiedEvent
 
-    event = FileModifiedEvent("/tmp/test_file.txt")
+    FileModifiedEvent("/tmp/test_file.txt")
 
     # First event should be accepted
     watcher._event_timestamps.clear()
