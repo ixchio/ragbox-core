@@ -1,11 +1,12 @@
 """
-RAGBox: Zero-Configuration Self-Building Agentic RAG System.
+RAGBox: Batteries-Included, Developer-Friendly Agentic RAG System.
 
+The RAG framework for people who don't want to think about RAG.
 Provides the public RAGBox class for one-line integrations.
 """
 import asyncio
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Optional
 
 from loguru import logger
 
@@ -24,7 +25,16 @@ from ragbox.utils.vector_stores import VectorStoreAutoDetector
 
 class RAGBox:
     """
-    RAG-in-a-Box: Zero-Configuration Self-Building Agentic RAG System.
+    RAG-in-a-Box: Batteries-Included, Developer-Friendly Agentic RAG System.
+
+    Usage::
+
+        rag = RAGBox("./my-docs")
+        answer = rag.query("What is our vacation policy?")
+
+        # Async streaming
+        async for chunk in rag.astream("Summarize all reports"):
+            print(chunk, end="")
     """
 
     def __init__(
@@ -80,12 +90,14 @@ class RAGBox:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            logger.warning("RAGBox initialized outside an active event loop. Build delayed until queried.")
+            logger.warning(
+                "RAGBox initialized outside an active event loop. Build delayed until queried."
+            )
             return
 
         # Fire and forget the initial build in the background
         asyncio.create_task(self.self_healer.initial_build())
-        
+
         # Start watchdog
         self.self_healer.start_watchdog()
 
@@ -125,9 +137,29 @@ class RAGBox:
         answer: Answer = await self.orchestrator.execute(question)
         return answer.content
 
+    async def astream(self, question: str) -> AsyncIterator[str]:
+        """
+        Stream the answer token-by-token using async iteration.
+
+        Usage::
+
+            async for chunk in rag.astream("What is X?"):
+                print(chunk, end="", flush=True)
+
+        Args:
+            question: The user's query.
+
+        Yields:
+            String chunks of the answer as they are generated.
+        """
+        async for chunk in self.orchestrator.stream_execute(question):
+            yield chunk
+
     def estimate_cost(self, query: Optional[str] = None) -> str:
         """
-        Estimate the cost of a query or indexing the corpus upfront.
+        Estimate the cost of a query or indexing the corpus.
+
+        Uses tiktoken for accurate token counting instead of byte-level estimation.
 
         Args:
             query: The query to run. If None, estimates the cost of indexing the entire corpus.
@@ -137,31 +169,38 @@ class RAGBox:
         """
         from ragbox.utils.cost_tracker import CostEstimator
 
-        # We assume the default model for estimating cost
+        model_name = (
+            self.llm_client._model if hasattr(self.llm_client, "_model") else "gpt-4o"
+        )
         estimator = CostEstimator(
-            self.llm_client.model_name
-            if hasattr(self.llm_client, "model_name")
-            else "gpt-4o"
+            model_name if isinstance(model_name, str) else "gpt-4o"
         )
 
         if query is None:
-            # Estimate cost of indexing the corpus based on file size
-            total_bytes = 0
+            # Read actual file contents and tokenize for accurate count
+            total_tokens = 0
+            total_files = 0
             for ext in self.document_processor.processors.keys():
                 for p in self.document_dir.rglob(f"*{ext}"):
                     if p.is_file():
-                        total_bytes += p.stat().st_size
+                        try:
+                            content = p.read_text(encoding="utf-8", errors="ignore")
+                            total_tokens += estimator.count_tokens(content)
+                            total_files += 1
+                        except Exception:
+                            # Fallback for binary files (images, etc.)
+                            total_tokens += int(p.stat().st_size * 0.25)
+                            total_files += 1
 
-            # Wild guess: 1 byte ~ 0.25 tokens
-            estimated_tokens = int(total_bytes * 0.25)
             # Embedding cost
-            embed_cost = (
-                estimated_tokens / 1_000_000
-            ) * 0.13  # large embedding assumption
-            return f"Corpus Indexing Estimate: ~{estimated_tokens} tokens. Embedding Cost: ${embed_cost:.4f}"
+            embed_cost = (total_tokens / 1_000_000) * 0.13
+            return (
+                f"Corpus Indexing Estimate: ~{total_tokens:,} tokens "
+                f"across {total_files} files. "
+                f"Embedding Cost: ${embed_cost:.4f}"
+            )
 
         else:
-            # Simulate retrieval and estimation for query
             try:
                 loop = asyncio.get_running_loop()
                 if loop.is_running():
@@ -172,14 +211,13 @@ class RAGBox:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
 
-            # Retrieve mock sources
             sources = loop.run_until_complete(self.retriever.retrieve(query))
             context_text = "\n".join([s.text for s in sources])
 
             estimate = estimator.estimate_generation(
                 prompt=f"{context_text}\n{query}", approx_output_tokens=500
             )
-            return estimate.__str__()
+            return str(estimate)
 
 
 __all__ = ["RAGBox"]

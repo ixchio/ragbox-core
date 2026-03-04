@@ -20,13 +20,16 @@ class CostEstimate:
 class CostEstimator:
     """Predicts processing costs before running."""
 
-    # Costs per 1M tokens (as of early 2024 pricing models)
+    # Costs per 1M tokens (2025 pricing)
     PRICING = {
         "text-embedding-3-small": {"input": 0.02, "output": 0.0},
         "text-embedding-3-large": {"input": 0.13, "output": 0.0},
         "gpt-4o": {"input": 5.00, "output": 15.00},
         "gpt-4o-mini": {"input": 0.15, "output": 0.60},
         "claude-3-5-sonnet-20240620": {"input": 3.00, "output": 15.00},
+        "llama-3.3-70b-versatile": {"input": 0.59, "output": 0.79},
+        "llama-3.1-8b-instant": {"input": 0.05, "output": 0.08},
+        "mixtral-8x7b-32768": {"input": 0.24, "output": 0.24},
         "local": {"input": 0.0, "output": 0.0},
     }
 

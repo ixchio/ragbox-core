@@ -95,6 +95,35 @@ class AgenticOrchestrator:
         answer.execution_time_ms = (time.time() - start_time) * 1000
         return answer
 
+    async def stream_execute(self, query_text: str):
+        """Stream the answer token-by-token. Retrieves context first, then streams LLM generation."""
+        strategy = await self._classify_query(query_text)
+        logger.info(f"Streaming query '{query_text}' with strategy {strategy.name}")
+
+        # Retrieve context (same as normal execute)
+        if strategy == RAGStrategy.MULTI_QUERY:
+            expanded_queries = await self._expand_query(query_text)
+            all_sources = []
+            for q in [query_text] + expanded_queries:
+                q_sources = await self.retriever.retrieve(q, top_k=3)
+                all_sources.extend(q_sources)
+            seen = set()
+            sources = []
+            for s in all_sources:
+                if s.text not in seen:
+                    seen.add(s.text)
+                    sources.append(s)
+            sources = sources[:10]
+        else:
+            sources = await self.retriever.retrieve(query_text)
+
+        context = "\n\n---\n\n".join([s.text for s in sources])
+        prompt = f"Answer the query based ONLY on the following context.\n\nContext:\n{context}\n\nQuery: {query_text}"
+        system = "You are an expert Q&A engine. Be concise and accurate."
+
+        async for chunk in self.llm.astream(prompt, system=system):
+            yield chunk
+
     async def _execute_vector(self, query: str) -> Answer:
         sources = await self.retriever.retrieve(query)
         context = "\n\n---\n\n".join([s.text for s in sources])

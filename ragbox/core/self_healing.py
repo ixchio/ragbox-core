@@ -33,13 +33,16 @@ class ContentAddressedStorage:
 
     def _init_db(self) -> None:
         import sqlite3
+
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute('''
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS file_hashes (
                     file_path TEXT PRIMARY KEY,
                     hash_value TEXT NOT NULL
                 )
-            ''')
+            """
+            )
 
     def get_hash(self, file_path: Path) -> Optional[str]:
         if not file_path.exists() or not file_path.is_file():
@@ -58,13 +61,16 @@ class ContentAddressedStorage:
         current_hash = self.get_hash(file_path)
         if not current_hash:
             return False
-            
+
         import sqlite3
+
         path_str = str(file_path)
         with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("SELECT hash_value FROM file_hashes WHERE file_path = ?", (path_str,))
+            cursor = conn.execute(
+                "SELECT hash_value FROM file_hashes WHERE file_path = ?", (path_str,)
+            )
             row = cursor.fetchone()
-            
+
         if not row or row[0] != current_hash:
             return True
         return False
@@ -73,10 +79,11 @@ class ContentAddressedStorage:
         new_hash = self.get_hash(file_path)
         if new_hash:
             import sqlite3
+
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute(
                     "INSERT OR REPLACE INTO file_hashes (file_path, hash_value) VALUES (?, ?)",
-                    (str(file_path), new_hash)
+                    (str(file_path), new_hash),
                 )
             return new_hash
         return ""
@@ -123,8 +130,23 @@ class ProductionFileWatcher(FileSystemEventHandler):
         self._events_deduplicated = 0
         self._events_processed = 0
 
+    # Paths the watchdog should never index
+    IGNORE_PATTERNS = {
+        ".ragbox_state",
+        ".git",
+        "__pycache__",
+        ".venv",
+        "node_modules",
+        ".chroma",
+    }
+
     def on_modified(self, event):
         if event.is_directory:
+            return
+
+        # Skip internal state files, VCS, and build artifacts
+        path_parts = set(Path(event.src_path).parts)
+        if path_parts & self.IGNORE_PATTERNS:
             return
 
         self._events_received += 1

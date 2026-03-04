@@ -6,7 +6,7 @@ import os
 import asyncio
 import json
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Optional
 from loguru import logger
 
 from ragbox.config.defaults import Settings
@@ -89,6 +89,26 @@ class LLMClient(ABC):
     ) -> Dict[str, Any]:
         """Asynchronously generate a response matching a JSON schema."""
         pass
+
+    async def _astream(
+        self, prompt: str, system: Optional[str] = None, **kwargs: Any
+    ) -> AsyncIterator[str]:
+        """Default streaming fallback: yields the full response as one chunk."""
+        result = await self._agenerate(prompt, system=system, **kwargs)
+        yield result
+
+    async def astream(
+        self, prompt: str, system: Optional[str] = None, **kwargs: Any
+    ) -> AsyncIterator[str]:
+        """Public streaming interface with circuit breaker protection."""
+        merged_kwargs = {
+            "system": system,
+            "temperature": kwargs.get("temperature", 0.0),
+            "max_tokens": kwargs.get("max_tokens", 800),
+        }
+        merged_kwargs.update(kwargs)
+        async for chunk in self._astream(prompt, **merged_kwargs):
+            yield chunk
 
 
 class OpenAIClient(LLMClient):
@@ -177,6 +197,19 @@ class AnthropicClient(LLMClient):
             messages=[{"role": "user", "content": prompt}],
         )
         return "".join([b.text for b in response.content if hasattr(b, "text")])
+
+    async def _astream(
+        self, prompt: str, system: Optional[str] = None, **kwargs: Any
+    ) -> AsyncIterator[str]:
+        async with self._client.messages.stream(
+            model=kwargs.get("model", self._model),
+            max_tokens=kwargs.get("max_tokens", 4096),
+            temperature=kwargs.get("temperature", 0.0),
+            system=system or "",
+            messages=[{"role": "user", "content": prompt}],
+        ) as stream:
+            async for text in stream.text_stream:
+                yield text
 
     async def _agenerate_structured(
         self,
@@ -287,6 +320,28 @@ class GroqClient(LLMClient):
         )
         return response.choices[0].message.content or ""
 
+    async def _astream(
+        self, prompt: str, system: Optional[str] = None, **kwargs: Any
+    ) -> AsyncIterator[str]:
+        messages = []
+        if system or kwargs.get("system"):
+            messages.append(
+                {"role": "system", "content": system or kwargs.get("system", "")}
+            )
+        messages.append({"role": "user", "content": prompt})
+
+        stream = await self._client.chat.completions.create(
+            model=kwargs.get("model", self._model),
+            messages=messages,
+            temperature=kwargs.get("temperature", 0.0),
+            max_tokens=kwargs.get("max_tokens", 800),
+            stream=True,
+        )
+        async for chunk in stream:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if delta and delta.content:
+                yield delta.content
+
     async def _agenerate_structured(
         self,
         prompt: str,
@@ -341,10 +396,10 @@ class LLMAutoDetector:
             "local_model_path",
             os.getenv("LOCAL_MODEL_PATH", "models/llama-3.1-8b-instruct.gguf"),
         )
-        
+
         if not os.path.exists(local_path):
             logger.warning(
-                "\n" + "="*80 + "\n"
+                "\n" + "=" * 80 + "\n"
                 "⚠️  NO API KEYS DETECTED AND LOCAL LLM NOT FOUND! ⚠️\n"
                 "RAGBox tried to fall back to a local model, but the weights are missing.\n"
                 "To unlock the full power of RAGBox, set ONE of the following environment variables:\n"
@@ -352,11 +407,11 @@ class LLMAutoDetector:
                 "  - export ANTHROPIC_API_KEY='your-key'\n"
                 "  - export GROQ_API_KEY='your-key'\n"
                 f"Alternatively, download a GGUF model and place it at: {local_path}\n"
-                + "="*80
+                + "=" * 80
             )
         else:
             logger.info("Falling back to local LLaMA.")
-            
+
         return LlamaCppClient(model_path=local_path)
 
 

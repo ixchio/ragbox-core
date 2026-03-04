@@ -107,10 +107,12 @@ class SelfOptimizingChunker:
 
         sample_doc = documents[0]
         ext = sample_doc.path.suffix.lower()
-        
+
         # Fast path: use cached strategy for this extension
         if ext in self._cached_strategies:
-            logger.debug(f"Using cached chunking strategy '{self._cached_strategies[ext]}' for '{ext}'")
+            logger.debug(
+                f"Using cached chunking strategy '{self._cached_strategies[ext]}' for '{ext}'"
+            )
             return self.strategies[self._cached_strategies[ext]]
 
         # Only sample first 5000 chars to save tokens

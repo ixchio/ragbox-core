@@ -10,7 +10,7 @@ from ragbox.config.defaults import Settings
 
 app = typer.Typer(
     name="ragbox",
-    help="RAGBox: Zero-Configuration Self-Building Agentic RAG System",
+    help="RAGBox: The RAG framework for people who don't want to think about RAG.",
     add_completion=False,
 )
 
