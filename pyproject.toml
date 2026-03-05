@@ -14,6 +14,11 @@ exclude = ["tests/", "docs/", "benchmarks/", ".env", "*.db", "chroma_db/", "know
 [tool.poetry.scripts]
 ragbox = "ragbox.cli:app"
 
+[tool.poetry.urls]
+Homepage = "https://github.com/ixchio/ragbox-core"
+Repository = "https://github.com/ixchio/ragbox-core"
+Issues = "https://github.com/ixchio/ragbox-core/issues"
+
 [tool.poetry.dependencies]
 python = "^3.11"
 # Core — always installed (~80MB)

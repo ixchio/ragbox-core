@@ -7,6 +7,8 @@
 
 > **RAG that works in 3 lines. Not 50.**
 
+⭐ **If this project helps you, consider giving it a star.**
+
 ---
 
 ## The Problem With LangChain
