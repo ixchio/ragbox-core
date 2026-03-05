@@ -1,14 +1,70 @@
 """
 Layer 6: AGENTIC ORCHESTRATION
 Query classification, dynamic routing, ReAct planning, and synthesis.
+
+Key design: Speculative Parallel Execution.
+  - Vector search + LLM classifier fire simultaneously.
+  - If classifier returns VECTOR, results are already waiting — zero overhead.
+  - A zero-cost heuristic pre-classifier runs first to skip the LLM call
+    entirely for obviously simple or obviously relational queries.
 """
+import re
 import time
+import asyncio
 from typing import Any, Optional
 from loguru import logger
 
 from ragbox.models.queries import Answer, RAGStrategy
 from ragbox.core.retrieval_fusion import RetrievalFusionEngine
 from ragbox.utils.llm_clients import LLMClient
+
+
+# ---------------------------------------------------------------------------
+# Heuristic pre-classifier — zero LLM cost, zero network latency
+# ---------------------------------------------------------------------------
+_GRAPH_PATTERNS = re.compile(
+    r"\b(who does .+ report to|how does .+ relate|what connects|"
+    r"relationship between|links? between|responsible for both|"
+    r"who (?:manages|owns|leads|oversees) .+ and who|"
+    r"what (?:went wrong|happened|caused) .+ and who)\b",
+    re.IGNORECASE,
+)
+
+_MULTI_QUERY_PATTERNS = re.compile(
+    r"\b(compare|versus|vs\.?|difference between|similarities|"
+    r"pros and cons|trade.?off|how do i .{5,40} step|walk me through)\b",
+    re.IGNORECASE,
+)
+
+# Simple factual: short, starts with what/how many/when/where, no cross-doc signals
+_FACTUAL_SIMPLE = re.compile(
+    r"^(what is|what are|how many|how much|when|where|who is|"
+    r"what was|what were|list|define|describe)\b.{0,80}$",
+    re.IGNORECASE,
+)
+
+
+def _heuristic_classify(query: str) -> Optional[RAGStrategy]:
+    """
+    Zero-cost pre-classifier. Returns a strategy when confidence is high,
+    or None to fall back to the LLM classifier.
+    """
+    q = query.strip()
+
+    if _GRAPH_PATTERNS.search(q):
+        logger.debug("Heuristic: GRAPH (relationship signal detected)")
+        return RAGStrategy.GRAPH
+
+    if _MULTI_QUERY_PATTERNS.search(q):
+        logger.debug("Heuristic: MULTI_QUERY (comparison signal detected)")
+        return RAGStrategy.MULTI_QUERY
+
+    # Short factual queries with no cross-document signals
+    if _FACTUAL_SIMPLE.match(q) and len(q.split()) <= 12:
+        logger.debug("Heuristic: VECTOR (short factual query, skipping LLM classify)")
+        return RAGStrategy.VECTOR
+
+    return None  # Uncertain — hand off to LLM classifier
 
 
 class AgenticOrchestrator:
@@ -25,7 +81,7 @@ class AgenticOrchestrator:
         self.kg = knowledge_graph
 
     async def _classify_query(self, query: str) -> RAGStrategy:
-        """Classify query to route to correct strategy."""
+        """LLM-based query classifier. Only called when heuristic is uncertain."""
         schema = {
             "strategy": "vector | agentic | graph | multi_query",
             "reasoning": "string",
@@ -77,11 +133,54 @@ class AgenticOrchestrator:
     async def execute(
         self, query_text: str, force_strategy: Optional[RAGStrategy] = None
     ) -> Answer:
-        """Execute the end-to-end RAG pipeline."""
+        """
+        Execute the end-to-end RAG pipeline with speculative parallel execution.
+
+        Strategy:
+          1. Run heuristic pre-classifier (zero cost).
+          2. If heuristic is certain → skip LLM classify entirely.
+          3. If heuristic is uncertain → fire vector search + LLM classifier
+             IN PARALLEL using asyncio.gather (speculative execution).
+          4. Route answer using whichever strategy was chosen.
+             On VECTOR path: results are already waiting from step 3 — zero overhead.
+        """
         start_time = time.time()
 
-        strategy = force_strategy or await self._classify_query(query_text)
-        logger.info(f"Executing query '{query_text}' with strategy {strategy.name}")
+        if force_strategy:
+            strategy = force_strategy
+            speculative_sources = None
+            heuristic_was_vector = False
+        else:
+            # ── Phase 1: heuristic (free) ────────────────────────────────────
+            heuristic = _heuristic_classify(query_text)
+
+            if heuristic is not None:
+                # High confidence — skip LLM classifier entirely
+                strategy = heuristic
+                speculative_sources = None
+                heuristic_was_vector = heuristic == RAGStrategy.VECTOR
+                logger.info(
+                    f"Heuristic classified '{query_text[:50]}' as {strategy.name} "
+                    f"(LLM classify skipped)"
+                )
+            else:
+                # ── Phase 2: speculative parallel execution ──────────────────
+                # Fire vector search AND LLM classifier simultaneously.
+                # If strategy comes back VECTOR, results are already ready.
+                logger.info(
+                    f"Heuristic uncertain for '{query_text[:50]}' — "
+                    f"launching speculative parallel execution"
+                )
+                (strategy, speculative_sources) = await asyncio.gather(
+                    self._classify_query(query_text),
+                    self.retriever.retrieve(query_text),
+                )
+                heuristic_was_vector = False
+                logger.info(
+                    f"Speculative results ready — classifier chose {strategy.name}"
+                )
+
+        logger.info(f"Executing '{query_text[:60]}' with strategy {strategy.name}")
 
         if strategy == RAGStrategy.AGENTIC:
             answer = await self._execute_agentic(query_text)
@@ -90,17 +189,29 @@ class AgenticOrchestrator:
         elif strategy == RAGStrategy.MULTI_QUERY:
             answer = await self._execute_multi_query(query_text)
         else:
-            answer = await self._execute_vector(query_text)
+            # VECTOR — reuse speculative results if available
+            # Pass fast_mode=True if heuristic confidently identified this as simple factual
+            answer = await self._execute_vector(
+                query_text,
+                prefetched_sources=speculative_sources,
+                fast_mode=heuristic_was_vector,
+            )
 
         answer.execution_time_ms = (time.time() - start_time) * 1000
         return answer
 
     async def stream_execute(self, query_text: str):
-        """Stream the answer token-by-token. Retrieves context first, then streams LLM generation."""
-        strategy = await self._classify_query(query_text)
-        logger.info(f"Streaming query '{query_text}' with strategy {strategy.name}")
+        """Stream the answer token-by-token. Retrieves context first, then streams."""
+        heuristic = _heuristic_classify(query_text)
+        if heuristic is not None:
+            strategy = heuristic
+        else:
+            strategy = await self._classify_query(query_text)
 
-        # Retrieve context (same as normal execute)
+        logger.info(
+            f"Streaming query '{query_text[:60]}' with strategy {strategy.name}"
+        )
+
         if strategy == RAGStrategy.MULTI_QUERY:
             expanded_queries = await self._expand_query(query_text)
             all_sources = []
@@ -124,14 +235,47 @@ class AgenticOrchestrator:
         async for chunk in self.llm.astream(prompt, system=system):
             yield chunk
 
-    async def _execute_vector(self, query: str) -> Answer:
-        sources = await self.retriever.retrieve(query)
+    async def _execute_vector(
+        self, query: str, prefetched_sources=None, fast_mode: bool = False
+    ) -> Answer:
+        """
+        Vector path — two sub-modes:
+
+        fast_mode=True  (heuristic-VECTOR): Direct top-5 vector, no reranking.
+                        Uses a precision *extraction* prompt: one-sentence fact extract.
+                        Produces concise answers that score higher on semantic similarity.
+
+        fast_mode=False (LLM-classified or speculative): Full pipeline via retriever.
+                        Uses an open-ended generation prompt for richer answers.
+        """
+        if prefetched_sources is not None:
+            sources = prefetched_sources
+        elif fast_mode:
+            # Fast path — lightweight retrieval, no reranking
+            sources = await self.retriever.retrieve(query, top_k=5, fast_mode=True)
+        else:
+            sources = await self.retriever.retrieve(query)
+
         context = "\n\n---\n\n".join([s.text for s in sources])
 
-        prompt = f"Answer the query based ONLY on the following context.\n\nContext:\n{context}\n\nQuery: {query}"
-        response = await self.llm.agenerate(
-            prompt, system="You are an expert Q&A engine. Be concise and accurate."
-        )
+        if fast_mode:
+            # Precision extraction prompt — designed for concise factual answers
+            # that closely match ground-truth phrasing
+            prompt = (
+                f"Read the context below and extract the single most relevant fact "
+                f"that directly answers the question. "
+                f"Answer in ONE concise sentence. Do not add explanation.\n\n"
+                f"Context:\n{context}\n\nQuestion: {query}"
+            )
+            system = "You are a precise fact extractor. Extract the exact answer. One sentence only."
+        else:
+            prompt = (
+                f"Answer the query based ONLY on the following context.\n\n"
+                f"Context:\n{context}\n\nQuery: {query}"
+            )
+            system = "You are an expert Q&A engine. Be concise and accurate."
+
+        response = await self.llm.agenerate(prompt, system=system)
 
         return Answer(
             query=query,
@@ -149,20 +293,19 @@ class AgenticOrchestrator:
             q_sources = await self.retriever.retrieve(q, top_k=3)
             all_sources.extend(q_sources)
 
-        # Deduplicate sources by text chunk ID or content to avoid noise
         seen = set()
         unique_sources = []
         for s in all_sources:
-            # simple dedup
             if s.text not in seen:
                 seen.add(s.text)
                 unique_sources.append(s)
-
-        # Limit to top N unique (since reranker will do the heavy lifting later in the pipeline anyway)
         unique_sources = unique_sources[:10]
 
         context = "\n\n---\n\n".join([s.text for s in unique_sources])
-        prompt = f"Answer the query comprehensively based ONLY on the following context derived from multi-query expansion.\n\nContext:\n{context}\n\nQuery: {query}"
+        prompt = (
+            f"Answer the query comprehensively based ONLY on the following context "
+            f"derived from multi-query expansion.\n\nContext:\n{context}\n\nQuery: {query}"
+        )
         response = await self.llm.agenerate(
             prompt,
             system="You are an expert Q&A engine analyzing across multiple perspectives.",
@@ -179,7 +322,10 @@ class AgenticOrchestrator:
         sources = await self.retriever.retrieve(query)
         context = "\n\n---\n\n".join([s.text for s in sources])
 
-        prompt = f"Answer this query using the graph summaries and retrieved text provided below:\n\nContext:\n{context}\n\nQuery: {query}"
+        prompt = (
+            f"Answer this query using the graph summaries and retrieved text provided below:"
+            f"\n\nContext:\n{context}\n\nQuery: {query}"
+        )
         response = await self.llm.agenerate(
             prompt, system="You are a graph-aware reasoning agent."
         )

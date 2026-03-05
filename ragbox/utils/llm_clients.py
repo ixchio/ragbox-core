@@ -112,17 +112,29 @@ class LLMClient(ABC):
 
 
 class OpenAIClient(LLMClient):
-    """OpenAI client wrapper."""
+    """OpenAI client wrapper. Also works with any OpenAI-compatible API (Ollama, etc.)."""
 
-    def __init__(self, api_key: str, model: str = "openai/gpt-oss-120b") -> None:
+    def __init__(self, api_key: str, model: str = "gpt-4o") -> None:
         super().__init__()
         try:
-            import openai
+            import os
             from openai import AsyncOpenAI
 
-            self._client = AsyncOpenAI(api_key=api_key)
+            base_url = os.environ.get(
+                "OPENAI_BASE_URL"
+            )  # e.g. http://localhost:11434/v1
+            model = os.environ.get("OPENAI_MODEL", model)  # override via env
+            self._client = AsyncOpenAI(
+                api_key=api_key,
+                base_url=base_url,  # None = use default api.openai.com
+            )
             self._model = model
-            logger.debug(f"Initialized OpenAIClient with {model}")
+            if base_url:
+                logger.debug(
+                    f"Initialized OpenAIClient (custom base) with {model} @ {base_url}"
+                )
+            else:
+                logger.debug(f"Initialized OpenAIClient with {model}")
         except ImportError:
             logger.error("Failed to import openai.")
             raise

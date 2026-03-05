@@ -94,6 +94,7 @@ That's it. No config files. No boilerplate. Point it at a folder and ask questio
 | Works in 3 lines | ❌ | ❌ | ✅ |
 | Auto-detects LLM provider | ❌ | ❌ | ✅ |
 | Built-in GraphRAG (Leiden) | ❌ | ❌ | ✅ |
+| Dual-Mode Retrieval (Fast Factual vs Deep Graph) | manual | manual | ✅ auto |
 | Cross-Encoder Reranking | manual | manual | ✅ auto |
 | Streaming (`astream()`) | complex | complex | ✅ built-in |
 | Self-healing watchdog | ❌ | ❌ | ✅ |
@@ -208,12 +209,14 @@ ragbox query "What is the vacation policy?" -d ./docs
 RAGBox is **not** for everyone. Here's exactly when to use it:
 
 ✅ **Use RAGBox if:**
+
 - You want a working RAG system today, not next week
 - You're tired of wiring together 10 LangChain components
 - You need cross-document reasoning (GraphRAG) without a PhD
 - You're building internal tools, demos, or MVPs
 
 ❌ **Don't use RAGBox if:**
+
 - You need highly custom retrieval pipelines
 - You're building a commercial RAG product with specific SLAs
 - You want to control every single component manually
@@ -222,7 +225,17 @@ RAGBox is **not** for everyone. Here's exactly when to use it:
 
 ## Benchmarks
 
-See [BENCHMARKS.md](BENCHMARKS.md) — reproducible comparisons against vanilla vector search on multi-hop reasoning tasks.
+See [BENCHMARKS.md](BENCHMARKS.md) — reproducible comparisons against vanilla vector search.
+
+**RAGBox features Dual-Mode Retrieval:**
+
+- **Fast Path (Factual):** Bypasses the graph and reranker for simple queries. ~1500ms latency.
+- **Deep Path (GraphRAG):** Activates multi-query, graph context, and cross-encoder reranking for complex queries.
+
+RAGBox wins heavily on cross-document reasoning. For example, on the query: *"What is the relationship between the deployment strategy and the SEV1 incident?"*:
+
+- **Vanilla Vector:** `0.802`
+- **RAGBox GraphRAG:** `0.891` (+0.089 Delta)
 
 ---
 

@@ -1,7 +1,4 @@
-"""
-Layer 4: AUTO-KNOWLEDGE-GRAPH
-Zero-ontology entity extraction, dynamic relations, and Leiden community detection.
-"""
+from pathlib import Path
 from typing import List, Tuple, Dict, Any, Set, Optional
 import asyncio
 from loguru import logger
@@ -17,11 +14,6 @@ from ragbox.utils.llm_clients import LLMClient
 
 
 class OptimizedKnowledgeGraph:
-    """
-    Production-ready Semantic Knowledge Graph.
-    Uses Leiden/Louvain for entity communities and handles incremental updates.
-    """
-
     def __init__(
         self, optimize_threshold: int = 100, llm_client: Optional[LLMClient] = None
     ):
@@ -42,7 +34,6 @@ class OptimizedKnowledgeGraph:
     def add_document(
         self, doc_id: str, entities: List[str], relationships: List[Dict[str, Any]]
     ) -> None:
-        """Add entities and relationships from a document incrementally"""
         new_nodes = 0
         new_edges = 0
 
@@ -107,7 +98,6 @@ class OptimizedKnowledgeGraph:
             self._detect_communities_fallback()
 
     def _detect_communities_leiden(self) -> None:
-        """Use Leiden algorithm for high-quality community detection"""
         logger.debug("Running Leiden algorithm for community detection")
 
         # Convert to igraph for Leiden

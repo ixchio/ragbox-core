@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-RAGBox Benchmark Suite v2
+RAGBox Benchmark Suite v3 — REAL GraphRAG (no mocks)
 
-Compares: RAGBox (full pipeline) vs Vanilla Vector Search
-Scoring: Sentence-Transformer cosine similarity (not word overlap)
-Focus: Includes cross-document relationship queries where GraphRAG shines
+Compares:
+  - RAGBox  : full pipeline (vector + Leiden GraphRAG + reranking + query routing)
+  - Vanilla : plain ChromaDB vector search + LLM answer
+
+Scoring: Sentence-Transformer cosine similarity (all-MiniLM-L6-v2)
+         Higher is better. Range [0, 1].
 
 Usage:
     GROQ_API_KEY=... python benchmarks/run_benchmark.py
@@ -189,10 +192,10 @@ Cost Impact: Estimated $340K in SLA credits (CFO David Kim to approve)
 }
 
 # ============================================================
-# QA Pairs — Mix of simple retrieval AND cross-document reasoning
+# QA Pairs — factual, relationship, multi-hop
 # ============================================================
 QA_PAIRS: List[Dict[str, str]] = [
-    # --- Simple factual (vanilla should do well) ---
+    # --- Simple factual ---
     {
         "question": "How many days of PTO do employees get?",
         "ground_truth": "20 days of PTO per year",
@@ -218,7 +221,7 @@ QA_PAIRS: List[Dict[str, str]] = [
         "ground_truth": "Over 200 data sources",
         "type": "factual",
     },
-    # --- Cross-document relationship (GraphRAG should win) ---
+    # --- Cross-document relationship (GraphRAG advantage) ---
     {
         "question": "Who does Maria Santos report to?",
         "ground_truth": "Maria Santos reports to VP of Engineering Lisa Park",
@@ -244,7 +247,7 @@ QA_PAIRS: List[Dict[str, str]] = [
         "ground_truth": "CISO Alex Rivera's security team works with VP Engineering Lisa Park on code review. They also built DataSync Pro's encryption layer together.",
         "type": "relationship",
     },
-    # --- Multi-hop reasoning (requires connecting 3+ docs) ---
+    # --- Multi-hop (3+ docs) ---
     {
         "question": "What is the company's plan to grow from $185M ARR to $250M and who is driving it?",
         "ground_truth": "CEO Michael Torres set the $250M target. Sales VP Rachel Nguyen is to focus on expansion revenue. Thomas Schmidt is expanding in EMEA. CTO James Wu is launching v3.0 with AI.",
@@ -272,6 +275,9 @@ QA_PAIRS: List[Dict[str, str]] = [
     },
 ]
 
+# Groq free tier: ~30 req/min. Sleep between LLM calls to stay safe.
+INTER_CALL_SLEEP = 2.5  # seconds
+
 
 def setup_test_corpus(base_dir: Path) -> Path:
     doc_dir = base_dir / "test_corpus"
@@ -282,7 +288,7 @@ def setup_test_corpus(base_dir: Path) -> Path:
 
 
 class SemanticScorer:
-    """Sentence-Transformer-based scoring instead of word overlap."""
+    """Sentence-Transformer cosine similarity scorer."""
 
     def __init__(self):
         from sentence_transformers import SentenceTransformer
@@ -293,61 +299,139 @@ class SemanticScorer:
         if not answer or not ground_truth:
             return 0.0
         embeddings = self.model.encode([answer, ground_truth])
-        # Cosine similarity
         a, b = embeddings[0], embeddings[1]
         sim = float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
-        return max(0.0, sim)  # Clamp to [0, 1]
+        return max(0.0, sim)
 
 
+# ─── RESET ChromaDB singleton between runs ────────────────────────────────────
+def _reset_chroma():
+    try:
+        import chromadb.api.client as cc
+
+        cc.SharedSystemClient._identifer_to_system = {}
+    except Exception:
+        pass
+
+
+# ─── VANILLA benchmark ────────────────────────────────────────────────────────
+async def run_vanilla_benchmark(doc_dir: Path, scorer: SemanticScorer) -> List[Dict]:
+    """Plain ChromaDB vector search + LLM — no graph, no reranking."""
+    from ragbox.utils.embeddings import EmbeddingAutoDetector
+    from ragbox.utils.vector_stores import ChromaStore
+    from ragbox.utils.llm_clients import LLMAutoDetector
+    from ragbox.config.defaults import Settings
+    from ragbox.core.chunking_engine import FixedChunker
+    from ragbox.models.documents import Document, DocumentType
+
+    _reset_chroma()
+    settings = Settings()
+    embeddings = EmbeddingAutoDetector.detect(settings)
+    llm = LLMAutoDetector.detect(settings)
+    store = ChromaStore(persist_dir=str(doc_dir / ".vanilla_chroma"))
+    chunker = FixedChunker(chunk_size=1000, overlap=200)
+
+    print("  Indexing corpus for Vanilla…")
+    for filename, content in DOCUMENTS.items():
+        doc = Document(
+            id=filename,
+            path=doc_dir / filename,
+            content=content.strip(),
+            doc_type=DocumentType.TEXT,
+        )
+        chunks = chunker.chunk(doc)
+        texts = [c.content for c in chunks]
+        emb_list = await embeddings.embed_documents(texts)
+        docs_to_add = [
+            {
+                "id": c.id,
+                "content": c.content,
+                "embedding": emb,
+                "metadata": {"doc_id": c.document_id},
+            }
+            for c, emb in zip(chunks, emb_list)
+        ]
+        if docs_to_add:
+            await store.add_documents(docs_to_add)
+
+    results = []
+    for i, qa in enumerate(QA_PAIRS):
+        print(f"  [{i+1}/{len(QA_PAIRS)}] Vanilla: {qa['question'][:60]}…")
+        start = time.time()
+        try:
+            query_emb = await embeddings.embed_query(qa["question"])
+            hits = await store.search(query_emb, k=5)
+            context = "\n\n".join([r.content for r in hits])
+            prompt = (
+                f"Answer based ONLY on this context:\n\n{context}"
+                f"\n\nQuestion: {qa['question']}"
+            )
+            answer = await llm.agenerate(prompt, system="Be concise and accurate.")
+            elapsed = (time.time() - start) * 1000
+            score = scorer.score(answer, qa["ground_truth"])
+            results.append(
+                {
+                    "question": qa["question"],
+                    "answer": answer[:300],
+                    "ground_truth": qa["ground_truth"],
+                    "score": round(score, 3),
+                    "latency_ms": round(elapsed, 0),
+                    "type": qa["type"],
+                    "system": "Vanilla Vector",
+                }
+            )
+            print(f"     score={score:.3f}  latency={elapsed:.0f}ms")
+        except Exception as e:
+            print(f"     ERROR: {e}")
+            results.append(
+                {
+                    "question": qa["question"],
+                    "answer": f"ERROR: {str(e)[:100]}",
+                    "ground_truth": qa["ground_truth"],
+                    "score": 0.0,
+                    "latency_ms": 0,
+                    "type": qa["type"],
+                    "system": "Vanilla Vector",
+                }
+            )
+        await asyncio.sleep(INTER_CALL_SLEEP)
+    return results
+
+
+# ─── RAGBOX benchmark ─────────────────────────────────────────────────────────
 async def run_ragbox_benchmark(doc_dir: Path, scorer: SemanticScorer) -> List[Dict]:
-    """RAGBox full pipeline."""
-    import os
+    """RAGBox full pipeline — real GraphRAG, real reranking, real query routing."""
+    _reset_chroma()
+    os.environ["CHROMA_DB_DIR"] = str(doc_dir / ".ragbox_chroma")
+
     from ragbox import RAGBox
 
-    os.environ["CHROMA_DB_DIR"] = str(doc_dir / ".ragbox_chroma")
-    try:
-        import chromadb.api.client as chroma_client
-
-        chroma_client.SharedSystemClient._identifer_to_system = {}
-    except Exception:
-        pass
-
+    print("  Initialising RAGBox (this builds the index + Knowledge Graph)…")
     rag = RAGBox(doc_dir)
 
-    # Disable Circuit Breaker for benchmark
-    try:
-        if hasattr(rag.orchestrator.cost_estimator, "_circuit_breaker"):
-            rag.orchestrator.cost_estimator._circuit_breaker.daily_budget_usd = 1000.0
-            rag.orchestrator.cost_estimator._circuit_breaker.per_query_budget_usd = 10.0
-    except Exception:
-        pass
-
-    # Monkeypatch the LLM client to skip GraphRAG extraction which costs too many tokens
-    # and hit the 100K TPD limit on Groq's free tier
-    original_extract = rag.knowledge_graph._extract_graph_data
-
-    async def mock_extract(documents):
-        return [], []  # Empty graph to bypass limits
-
-    rag.knowledge_graph._extract_graph_data = mock_extract
-
-    # Wait for index to be ready
-    print("  Waiting for RAGBox to build index and knowledge graph...")
-    for i in range(30):
+    # Wait for the async index build to finish (self_healer.initial_build)
+    print("  Waiting for index to be ready…", end="", flush=True)
+    for i in range(60):
         await asyncio.sleep(2)
         try:
             test_emb = await rag.embedding_provider.embed_query("test")
-            results = await rag.vector_store.search(test_emb, k=1, min_score=-1.0)
-            if len(results) >= 1:
-                print(f"  Index ready after ~{(i + 1) * 2}s")
+            hits = await rag.vector_store.search(test_emb, k=1, min_score=-1.0)
+            if hits:
+                print(f" ready after ~{(i+1)*2}s")
                 break
         except Exception:
+            print(".", end="", flush=True)
             continue
+    else:
+        print(" timeout — proceeding anyway")
 
-    rag.knowledge_graph._extract_graph_data = original_extract  # Restore
+    # Extra pause to let graph extraction finish (it runs concurrently)
+    print("  Waiting 5s for Knowledge Graph construction to settle…")
+    await asyncio.sleep(5)
 
     results = []
-    for qa in QA_PAIRS:
+    for i, qa in enumerate(QA_PAIRS):
+        print(f"  [{i+1}/{len(QA_PAIRS)}] RAGBox:  {qa['question'][:60]}…")
         start = time.time()
         try:
             answer = await rag.aquery(qa["question"])
@@ -364,7 +448,9 @@ async def run_ragbox_benchmark(doc_dir: Path, scorer: SemanticScorer) -> List[Di
                     "system": "RAGBox",
                 }
             )
+            print(f"     score={score:.3f}  latency={elapsed:.0f}ms")
         except Exception as e:
+            print(f"     ERROR: {e}")
             results.append(
                 {
                     "question": qa["question"],
@@ -376,93 +462,12 @@ async def run_ragbox_benchmark(doc_dir: Path, scorer: SemanticScorer) -> List[Di
                     "system": "RAGBox",
                 }
             )
+        await asyncio.sleep(INTER_CALL_SLEEP)
     return results
 
 
-async def run_vanilla_benchmark(doc_dir: Path, scorer: SemanticScorer) -> List[Dict]:
-    """Vanilla vector search — no graph, no reranking."""
-    from ragbox.utils.embeddings import EmbeddingAutoDetector
-    from ragbox.utils.vector_stores import ChromaStore
-    from ragbox.utils.llm_clients import LLMAutoDetector
-    from ragbox.config.defaults import Settings
-    from ragbox.core.chunking_engine import FixedChunker
-    from ragbox.models.documents import Document, DocumentType
-
-    try:
-        import chromadb.api.client as chroma_client
-
-        chroma_client.SharedSystemClient._identifer_to_system = {}
-    except Exception:
-        pass
-
-    settings = Settings()
-    embeddings = EmbeddingAutoDetector.detect(settings)
-    llm = LLMAutoDetector.detect(settings)
-    store = ChromaStore(persist_dir=str(doc_dir / ".vanilla_chroma"))
-    chunker = FixedChunker(chunk_size=1000, overlap=200)
-
-    for filename, content in DOCUMENTS.items():
-        doc = Document(
-            id=filename,
-            path=doc_dir / filename,
-            content=content.strip(),
-            doc_type=DocumentType.TEXT,
-        )
-        chunks = chunker.chunk(doc)
-        texts = [c.content for c in chunks]
-        embeddings_list = await embeddings.embed_documents(texts)
-        docs_to_add = [
-            {
-                "id": c.id,
-                "content": c.content,
-                "embedding": emb,
-                "metadata": {"doc_id": c.document_id},
-            }
-            for c, emb in zip(chunks, embeddings_list)
-        ]
-        if docs_to_add:
-            await store.add_documents(docs_to_add)
-
-    results = []
-    for qa in QA_PAIRS:
-        start = time.time()
-        try:
-            query_emb = await embeddings.embed_query(qa["question"])
-            search_results = await store.search(query_emb, k=5)
-            context = "\n\n".join([r.content for r in search_results])
-            prompt = f"Answer based ONLY on this context:\n\n{context}\n\nQuestion: {qa['question']}"
-            answer = await llm.agenerate(prompt, system="Be concise and accurate.")
-            elapsed = (time.time() - start) * 1000
-            score = scorer.score(answer, qa["ground_truth"])
-            results.append(
-                {
-                    "question": qa["question"],
-                    "answer": answer[:300],
-                    "ground_truth": qa["ground_truth"],
-                    "score": round(score, 3),
-                    "latency_ms": round(elapsed, 0),
-                    "type": qa["type"],
-                    "system": "Vanilla Vector",
-                }
-            )
-        except Exception as e:
-            results.append(
-                {
-                    "question": qa["question"],
-                    "answer": f"ERROR: {str(e)[:100]}",
-                    "ground_truth": qa["ground_truth"],
-                    "score": 0.0,
-                    "latency_ms": 0,
-                    "type": qa["type"],
-                    "system": "Vanilla Vector",
-                }
-            )
-    return results
-
-
+# ─── REPORT ───────────────────────────────────────────────────────────────────
 def generate_report(ragbox_results: List[Dict], vanilla_results: List[Dict]) -> str:
-    """Generate detailed markdown benchmark report."""
-
     def avg_by_type(results, qtype):
         typed = [r for r in results if r["type"] == qtype]
         return sum(r["score"] for r in typed) / max(len(typed), 1)
@@ -473,26 +478,28 @@ def generate_report(ragbox_results: List[Dict], vanilla_results: List[Dict]) -> 
 
     r_overall = sum(r["score"] for r in ragbox_results) / len(ragbox_results)
     v_overall = sum(r["score"] for r in vanilla_results) / len(vanilla_results)
-
     r_factual = avg_by_type(ragbox_results, "factual")
     v_factual = avg_by_type(vanilla_results, "factual")
-    r_relationship = avg_by_type(ragbox_results, "relationship")
-    v_relationship = avg_by_type(vanilla_results, "relationship")
-    r_multihop = avg_by_type(ragbox_results, "multi_hop")
-    v_multihop = avg_by_type(vanilla_results, "multi_hop")
+    r_rel = avg_by_type(ragbox_results, "relationship")
+    v_rel = avg_by_type(vanilla_results, "relationship")
+    r_mh = avg_by_type(ragbox_results, "multi_hop")
+    v_mh = avg_by_type(vanilla_results, "multi_hop")
 
-    # Determine winner per category
     def winner(a, b):
         if a > b + 0.02:
-            return "**RAGBox**"
+            return "**RAGBox** ✅"
         elif b > a + 0.02:
             return "Vanilla"
         return "Tie"
+
+    def lat_winner(a, b):
+        return "**RAGBox** ✅" if avg_latency(a) < avg_latency(b) else "Vanilla"
 
     report = f"""# RAGBox Benchmark Results
 
 > Scored using sentence-transformer cosine similarity (not word overlap).
 > Higher = better. Max score: 1.0.
+> Generated by real LLM calls — no mocks.
 
 ## Summary
 
@@ -500,11 +507,11 @@ def generate_report(ragbox_results: List[Dict], vanilla_results: List[Dict]) -> 
 |---|---|---|---|
 | **Overall** | {r_overall:.3f} | {v_overall:.3f} | {winner(r_overall, v_overall)} |
 | **Factual** (simple lookup) | {r_factual:.3f} | {v_factual:.3f} | {winner(r_factual, v_factual)} |
-| **Relationship** (cross-doc) | {r_relationship:.3f} | {v_relationship:.3f} | {winner(r_relationship, v_relationship)} |
-| **Multi-Hop** (3+ docs) | {r_multihop:.3f} | {v_multihop:.3f} | {winner(r_multihop, v_multihop)} |
-| **Avg Latency** | {avg_latency(ragbox_results):.0f}ms | {avg_latency(vanilla_results):.0f}ms | {"Vanilla" if avg_latency(vanilla_results) < avg_latency(ragbox_results) else "RAGBox"} |
+| **Relationship** (cross-doc) | {r_rel:.3f} | {v_rel:.3f} | {winner(r_rel, v_rel)} |
+| **Multi-Hop** (3+ docs) | {r_mh:.3f} | {v_mh:.3f} | {winner(r_mh, v_mh)} |
+| **Avg Latency** | {avg_latency(ragbox_results):.0f}ms | {avg_latency(vanilla_results):.0f}ms | {lat_winner(ragbox_results, vanilla_results)} |
 
-RAGBox: Vector + Knowledge Graph (Leiden) + Cross-Encoder Reranking + Query Routing
+RAGBox: Vector + Knowledge Graph (Leiden) + Cross-Encoder Reranking + Agentic Query Routing  
 Vanilla: ChromaDB vector search only
 
 ## Detailed Results
@@ -516,70 +523,100 @@ Vanilla: ChromaDB vector search only
 """
     for rr, vr in zip(ragbox_results, vanilla_results):
         if rr["type"] == "factual":
-            q = rr["question"][:55]
-            report += f"| {q} | {rr['score']:.3f} | {vr['score']:.3f} |\n"
+            report += (
+                f"| {rr['question'][:60]} | {rr['score']:.3f} | {vr['score']:.3f} |\n"
+            )
 
     report += "\n### Relationship Questions (Cross-Document)\n\n| Question | RAGBox | Vanilla |\n|---|---|---|\n"
     for rr, vr in zip(ragbox_results, vanilla_results):
         if rr["type"] == "relationship":
-            q = rr["question"][:55]
-            report += f"| {q} | {rr['score']:.3f} | {vr['score']:.3f} |\n"
+            report += (
+                f"| {rr['question'][:60]} | {rr['score']:.3f} | {vr['score']:.3f} |\n"
+            )
 
     report += "\n### Multi-Hop Questions (3+ Documents)\n\n| Question | RAGBox | Vanilla |\n|---|---|---|\n"
     for rr, vr in zip(ragbox_results, vanilla_results):
         if rr["type"] == "multi_hop":
-            q = rr["question"][:55]
-            report += f"| {q} | {rr['score']:.3f} | {vr['score']:.3f} |\n"
+            report += (
+                f"| {rr['question'][:60]} | {rr['score']:.3f} | {vr['score']:.3f} |\n"
+            )
 
     report += f"""
+## Sample Answers
+
+### RAGBox — "Who does Maria Santos report to?"
+> {next((r["answer"] for r in ragbox_results if "Maria Santos" in r["question"]), "N/A")}
+
+### Vanilla — "Who does Maria Santos report to?"
+> {next((r["answer"] for r in vanilla_results if "Maria Santos" in r["question"]), "N/A")}
+
+---
+
 ## Methodology
 
 - **Corpus**: {len(DOCUMENTS)} interconnected documents with shared entities and relationships
 - **Questions**: {len(QA_PAIRS)} total — 5 factual, 5 relationship, 5 multi-hop
-- **Scoring**: Sentence-Transformer (`all-MiniLM-L6-v2`) cosine similarity between generated answer and ground truth
-- **Reproducibility**: All documents embedded in the script. Run `python benchmarks/run_benchmark.py`
+- **Scoring**: Sentence-Transformer (`all-MiniLM-L6-v2`) cosine similarity
+- **GraphRAG**: Real LLM entity extraction — no mocks
+- **Backend**: Groq (llama-3 / mixtral) — free tier
 
 ## How to Reproduce
 
 ```bash
-export GROQ_API_KEY="gsk_..."  # or OPENAI_API_KEY
+export GROQ_API_KEY="gsk_..."   # or OPENAI_API_KEY
 python benchmarks/run_benchmark.py
 ```
 """
     return report
 
 
+# ─── MAIN ─────────────────────────────────────────────────────────────────────
 async def main():
     print("=" * 60)
-    print("RAGBox Benchmark Suite v2")
+    print("RAGBox Benchmark Suite v3 — Real GraphRAG")
     print("=" * 60)
 
-    if not any(
+    has_key = any(
         os.getenv(k) for k in ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GROQ_API_KEY"]
-    ):
-        print("ERROR: Set OPENAI_API_KEY, ANTHROPIC_API_KEY, or GROQ_API_KEY")
+    )
+    if not has_key:
+        print("\nERROR: No API key found.")
+        print("  Set GROQ_API_KEY=gsk_... (free tier works)")
         sys.exit(1)
 
+    key_name = (
+        "GROQ_API_KEY"
+        if os.getenv("GROQ_API_KEY")
+        else "OPENAI_API_KEY"
+        if os.getenv("OPENAI_API_KEY")
+        else "ANTHROPIC_API_KEY"
+    )
+    print(f"\n✅ Using API key: {key_name}")
+
     scorer = SemanticScorer()
-    print("Semantic scorer loaded (all-MiniLM-L6-v2)")
+    print("Semantic scorer loaded (all-MiniLM-L6-v2)\n")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         doc_dir = setup_test_corpus(Path(tmpdir))
-        print(f"\nCorpus: {len(DOCUMENTS)} documents in {doc_dir}")
+        print(f"Corpus: {len(DOCUMENTS)} documents written to {doc_dir}\n")
 
-        print("\n--- Running Vanilla Vector Search ---")
+        print("─" * 60)
+        print("PHASE 1 — Vanilla Vector Search")
+        print("─" * 60)
         vanilla_results = await run_vanilla_benchmark(doc_dir, scorer)
-        print(f"Completed {len(vanilla_results)} queries")
+        print(f"✅ Vanilla done — {len(vanilla_results)} queries\n")
 
-        print("\n--- Running RAGBox Full Pipeline ---")
+        print("─" * 60)
+        print("PHASE 2 — RAGBox Full Pipeline (Real GraphRAG)")
+        print("─" * 60)
         ragbox_results = await run_ragbox_benchmark(doc_dir, scorer)
-        print(f"Completed {len(ragbox_results)} queries")
+        print(f"✅ RAGBox done — {len(ragbox_results)} queries\n")
 
         report = generate_report(ragbox_results, vanilla_results)
 
         report_path = Path(__file__).parent.parent / "BENCHMARKS.md"
         report_path.write_text(report)
-        print(f"\nReport saved to {report_path}")
+        print(f"Report saved → {report_path}")
         print("\n" + report)
 
 
