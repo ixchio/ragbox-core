@@ -98,11 +98,12 @@ That's it. No config files. No boilerplate. Point it at a folder and ask questio
 | Built-in GraphRAG (Leiden) | ❌ | ❌ | ✅ |
 | Dual-Mode Retrieval (Fast Factual vs Deep Graph) | manual | manual | ✅ auto |
 | Cross-Encoder Reranking | manual | manual | ✅ auto |
+| Multi-hop Query Decomposition | manual | manual | ✅ auto |
 | Streaming (`astream()`) | complex | complex | ✅ built-in |
 | Self-healing watchdog | ❌ | ❌ | ✅ |
 | Cost estimation before indexing | ❌ | ❌ | ✅ |
-| Multi-query expansion | manual | manual | ✅ auto |
-| Default install size | ~500MB | ~300MB | **~80MB** |
+| Recursive semantic chunking | manual | manual | ✅ auto |
+| Circuit breaker (cost protection) | ❌ | ❌ | ✅ |
 
 ---
 
@@ -174,20 +175,24 @@ RAGBox wires up 7 components automatically — you never touch them:
 Your Documents
      │
      ▼
-Document Processor   ← auto-routes PDF / TXT / PPTX / Code
+Document Processor       ← auto-routes PDF / TXT / PPTX / Code
      │
-     ├──▶ Chunking Engine  ← late chunking with context awareness
+     ├──▶ Chunking Engine    ← recursive semantic chunking
      │
-     ├──▶ Vector Store     ← ChromaDB, auto-configured
+     ├──▶ Vector Store       ← ChromaDB, context-enriched embeddings
      │
-     └──▶ Knowledge Graph  ← Leiden/Louvain entity extraction
+     └──▶ Knowledge Graph    ← Leiden/Louvain entity extraction + community summaries
                                           │
 Your Question ────────────────────────────▼
      │                          Agentic Orchestrator
-     │                       (classifies: vector / graph / multi-query)
-     │                                    │
-     └────────────────────────────────────▼
-                               Retrieval Fusion + Reranking
+     │                       (classifies: vector / graph / multi-hop)
+     │                              │           │
+     │                    ┌─────────┘           └──────────┐
+     │              Simple queries          Complex queries
+     │              (fast vector)        (decompose + graph + vector)
+     │                    │                        │
+     └────────────────────┴────────────────────────┘
+                               Retrieval Fusion (RRF) + Cross-Encoder Reranking
                                           │
                                      Your Answer
 ```
@@ -231,13 +236,10 @@ See [BENCHMARKS.md](BENCHMARKS.md) — reproducible comparisons against vanilla 
 
 **RAGBox features Dual-Mode Retrieval:**
 
-- **Fast Path (Factual):** Bypasses the graph and reranker for simple queries. ~1500ms latency.
-- **Deep Path (GraphRAG):** Activates multi-query, graph context, and cross-encoder reranking for complex queries.
+- **Fast Path (Factual):** Bypasses the graph and reranker for simple queries. Low latency.
+- **Deep Path (GraphRAG):** Activates multi-hop decomposition, graph entity traversal, community context, and cross-encoder reranking for complex queries.
 
-RAGBox wins heavily on cross-document reasoning. For example, on the query: *"What is the relationship between the deployment strategy and the SEV1 incident?"*:
-
-- **Vanilla Vector:** `0.802`
-- **RAGBox GraphRAG:** `0.891` (+0.089 Delta)
+The Deep Path excels on cross-document reasoning — queries about entity relationships, organizational structure, and cause-effect chains that span multiple documents.
 
 ---
 

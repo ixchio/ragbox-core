@@ -64,42 +64,39 @@ class SentenceTransformerProvider(EmbeddingProvider):
         self, document: "Document", chunks: List["Chunk"], llm_client: Any = None
     ) -> List[List[float]]:
         """
-        True Late Chunking implementation.
-        Embeds the entire document sequence, then applies mean-pooling over the specific token
-        windows corresponding to each chunk, preserving global attention.
+        Context-enriched embedding: embeds each chunk with its surrounding
+        document context via a sliding window, improving retrieval quality
+        for chunks that reference entities or concepts defined elsewhere.
         """
         if not chunks:
             return []
 
-        def _late_chunk_sync() -> List[List[float]]:
-            logger.info(f"Applying True Late Chunking to {document.path}")
-            # Get raw token sequence and embeddings for the full document
-            # Note: We truncate context to the model's max window (e.g., 512 for MiniLM) to prevent OOM
-            # For a production system this would use a sliding window over the document.
-
-            # Since SentenceTransformers natively handles pooling internally for `encode`,
-            # writing a mathematically pure late chunker requires dropping down to PyTorch/HuggingFace.
-            # For this MVP, we simulate it by embedding chunks WITH their surrounding text (sliding window).
-            # True late chunking: "Document -> Embed ENTIRE -> Split -> Context PRESERVED"
-
-            embedded_chunks = []
+        def _context_embed_sync() -> List[List[float]]:
+            logger.info(f"Context-enriched embedding for {document.path}")
             doc_text = document.content
+            embedded_chunks = []
 
             for chunk in chunks:
-                # "Late chunking" proxy using sliding window context:
                 start = chunk.metadata.get("start_idx", 0)
                 end = chunk.metadata.get("end_idx", len(chunk.content))
 
-                # Expand context by 1000 chars on each side
-                context_start = max(0, start - 1000)
-                context_end = min(len(doc_text), end + 1000)
+                # Expand context window by 800 chars on each side
+                context_start = max(0, start - 800)
+                context_end = min(len(doc_text), end + 800)
 
-                contextualized_text = f"Context: {doc_text[context_start:start]}\n---\nChunk: {chunk.content}\n---\nContext: {doc_text[end:context_end]}"
-                embedded_chunks.append(contextualized_text)
+                before = doc_text[context_start:start].strip()
+                after = doc_text[end:context_end].strip()
+                parts = []
+                if before:
+                    parts.append(before)
+                parts.append(chunk.content)
+                if after:
+                    parts.append(after)
+                embedded_chunks.append(" ".join(parts))
 
             return self._model.encode(embedded_chunks).tolist()
 
-        return await asyncio.to_thread(_late_chunk_sync)
+        return await asyncio.to_thread(_context_embed_sync)
 
     @property
     def dimension(self) -> int:

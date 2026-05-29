@@ -1,12 +1,13 @@
 """
 Layer 5: RETRIEVAL FUSION
-Hybrid Dense (vector) + Sparse (BM25) + Graph (knowledge) with Reciprocal Rank Fusion.
+Hybrid Dense (vector) + Graph (knowledge) with Reciprocal Rank Fusion.
 
 Dual-Mode Retrieval:
   FAST MODE  — simple factual queries: direct top-k vector, no pool inflation,
                no graph, no reranking. Latency: ~50-150ms.
-  FULL MODE  — complex queries: candidate pool + graph + RRF + cross-encoder.
-               Latency: 400-1500ms. Wins on cross-doc reasoning.
+  FULL MODE  — complex queries: candidate pool + graph context + RRF + cross-encoder.
+               Graph context provides entity relationships and community summaries
+               that augment vector results for cross-document reasoning.
 """
 from typing import List, Dict, Any
 from loguru import logger
@@ -17,7 +18,6 @@ from ragbox.utils.embeddings import EmbeddingProvider
 from ragbox.utils.llm_clients import LLMClient
 from ragbox.models.queries import Source
 
-# Thresholds for the adaptive rerank skip (full mode only)
 _SKIP_RERANK_MIN_SCORE: float = 0.92
 _SKIP_RERANK_MIN_GAP: float = 0.15
 
@@ -46,12 +46,7 @@ class RetrievalFusionEngine:
         Hybrid retrieval with dual-mode dispatch.
 
         fast_mode=True  → Direct vector top-k. No graph, no reranking.
-                          Used for simple factual queries identified by the heuristic.
-                          Latency: 50-150ms.
-
-        fast_mode=False → Full pipeline: candidate pool + graph + RRF + cross-encoder.
-                          Used for complex, multi-hop, and graph queries.
-                          Latency: 400-1500ms.
+        fast_mode=False → Full pipeline: vector + graph + RRF + cross-encoder.
         """
         query_emb = await self.embeddings.embed_query(query)
 
@@ -60,60 +55,55 @@ class RetrievalFusionEngine:
         else:
             return await self._retrieve_full(query, query_emb, top_k)
 
-    # ── FAST PATH ─────────────────────────────────────────────────────────────
     async def _retrieve_fast(
         self, query: str, query_emb: list, top_k: int
     ) -> List[Source]:
-        """
-        Pure vector lookup — no graph, no candidate pool inflation, no reranking.
-        Optimised for simple factual queries where the answer lives in one chunk.
-        """
-        logger.info(f"FAST retrieval for: {query}")
+        """Pure vector lookup — no graph, no reranking."""
+        logger.info(f"FAST retrieval for: {query[:60]}")
         results = await self.vstore.search(query_emb, k=top_k)
         return [
             Source(
-                document_id=r.metadata.get("doc_id", "unknown")
-                if hasattr(r, "metadata")
-                else "unknown",
-                text=r.content if hasattr(r, "content") else r.get("content", ""),
-                score=r.score if hasattr(r, "score") else r.get("score", 0.0),
+                document_id=r.metadata.get("doc_id", "unknown"),
+                text=r.content, score=r.score,
             )
             for r in results[:top_k]
         ]
 
-    # ── FULL PIPELINE ─────────────────────────────────────────────────────────
     async def _retrieve_full(
         self, query: str, query_emb: list, top_k: int
     ) -> List[Source]:
         """
-        Full pipeline: large candidate pool + graph + RRF + cross-encoder reranking.
-        Used for relationship, graph, and multi-hop queries.
+        Full pipeline: vector search + graph context + RRF + cross-encoder.
+
+        Key improvement: graph results inject entity source texts and
+        relationship context as additional retrieval candidates, giving the
+        LLM cross-document information that pure vector search misses.
         """
-        logger.info(f"FULL retrieval for: {query}")
+        import asyncio
+
+        logger.info(f"FULL retrieval for: {query[:60]}")
         candidate_pool_size = max(50, top_k * 10)
 
-        # 1. Dense vector search
-        vector_results = await self.vstore.search(query_emb, k=candidate_pool_size)
+        # Run vector search and graph query in parallel
+        vector_task = self.vstore.search(query_emb, k=candidate_pool_size)
+        graph_task = self.kg.query(query)
+        vector_results, graph_results = await asyncio.gather(vector_task, graph_task)
 
-        # 2. Graph search (community context + entity relationships)
-        graph_results = await self.kg.query(query)
-
-        # 3. Reciprocal Rank Fusion
+        # Merge via RRF
         merged = self._rrf(vector_results, graph_results, k=60)
 
-        # 4. Adaptive rerank: skip cross-encoder if top result is clearly dominant
+        # Adaptive rerank skip
         if self._should_skip_rerank(vector_results, graph_results):
             logger.debug("Adaptive rerank skip — high-confidence top result")
             return [
                 Source(
                     document_id=item.get("metadata", {}).get("doc_id", "unknown"),
-                    text=item.get("content", ""),
-                    score=item.get("score", 0.0),
+                    text=item.get("content", ""), score=item.get("score", 0.0),
                 )
                 for item in merged[:top_k]
             ]
 
-        # 5. Cross-encoder reranking on pruned candidates
+        # Cross-encoder reranking on pruned candidates
         pruned = merged[: max(15, top_k * 3)]
         reranked = await self.reranker.rerank(query, pruned, top_k=top_k)
 
@@ -140,13 +130,21 @@ class RetrievalFusionEngine:
         return top >= _SKIP_RERANK_MIN_SCORE and (top - second) >= _SKIP_RERANK_MIN_GAP
 
     def _rrf(
-        self, vector_res: List[Dict[str, Any]], graph_res: Any, k: int = 60
+        self, vector_res: list, graph_res: Any, k: int = 60
     ) -> List[Dict[str, Any]]:
+        """
+        Reciprocal Rank Fusion that properly integrates graph context.
+
+        Graph context is split into meaningful chunks (entity descriptions,
+        source texts, community summaries) and injected as separate candidates
+        so the cross-encoder can score them individually.
+        """
         scores: Dict[str, float] = {}
         items: Dict[str, Dict[str, Any]] = {}
 
+        # Vector results
         for rank, item in enumerate(vector_res):
-            id_ = item.id if hasattr(item, "id") else item.get("id")
+            id_ = item.id if hasattr(item, "id") else item.get("id", f"vec_{rank}")
             if id_ not in scores:
                 scores[id_] = 0.0
                 items[id_] = (
@@ -161,15 +159,20 @@ class RetrievalFusionEngine:
                 )
             scores[id_] += 1.0 / (k + rank)
 
+        # Graph results — inject as individual context chunks
         if graph_res and graph_res.synthesized_context:
-            g_id = "graph_context_1"
-            scores[g_id] = 1.0 / (k + 1)
-            items[g_id] = {
-                "id": g_id,
-                "content": graph_res.synthesized_context,
-                "metadata": {"doc_id": "knowledge_graph"},
-                "score": 1.0 / (k + 1),
-            }
+            # Split graph context into meaningful segments for individual scoring
+            context_segments = self._split_graph_context(graph_res)
+            for idx, segment in enumerate(context_segments):
+                g_id = f"graph_ctx_{idx}"
+                # Graph context gets a rank boost proportional to its position
+                scores[g_id] = 1.0 / (k + idx)
+                items[g_id] = {
+                    "id": g_id,
+                    "content": segment,
+                    "metadata": {"doc_id": "knowledge_graph", "source": "graph"},
+                    "score": 1.0 / (k + idx),
+                }
 
         sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
         result = []
@@ -178,3 +181,32 @@ class RetrievalFusionEngine:
             item["score"] = scores[id_]
             result.append(item)
         return result
+
+    def _split_graph_context(self, graph_res: Any) -> List[str]:
+        """
+        Split graph context into coherent segments for individual RRF scoring.
+        Each entity block and community summary becomes a separate candidate.
+        """
+        full_context = graph_res.synthesized_context
+        if not full_context:
+            return []
+
+        # Split on double newlines (each entity/community block)
+        segments = [s.strip() for s in full_context.split("\n\n") if s.strip()]
+
+        # Merge very short segments and cap very long ones
+        result = []
+        buffer = ""
+        for seg in segments:
+            if len(seg) < 50 and buffer:
+                buffer += "\n" + seg
+            elif len(buffer) + len(seg) < 1500:
+                buffer = (buffer + "\n" + seg).strip() if buffer else seg
+            else:
+                if buffer:
+                    result.append(buffer)
+                buffer = seg
+        if buffer:
+            result.append(buffer)
+
+        return result[:10]  # Cap at 10 segments

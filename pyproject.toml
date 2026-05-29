@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "ragbox-core"
-version = "2.1.1"
-description = "RAG in 3 lines. Auto-GraphRAG, auto-reranking, auto-streaming. No LangChain required."
+version = "3.0.0"
+description = "RAG in 3 lines. Real GraphRAG with entity traversal, multi-hop decomposition, cross-encoder reranking, and streaming. No LangChain required."
 authors = ["Developer <amankumarpandeyin@gmail.com>"]
 readme = "README.md"
 repository = "https://github.com/ixchio/ragbox-core"

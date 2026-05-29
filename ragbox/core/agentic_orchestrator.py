@@ -1,12 +1,12 @@
 """
 Layer 6: AGENTIC ORCHESTRATION
-Query classification, dynamic routing, ReAct planning, and synthesis.
+Query classification, dynamic routing, multi-hop decomposition, and synthesis.
 
-Key design: Speculative Parallel Execution.
-  - Vector search + LLM classifier fire simultaneously.
-  - If classifier returns VECTOR, results are already waiting — zero overhead.
-  - A zero-cost heuristic pre-classifier runs first to skip the LLM call
-    entirely for obviously simple or obviously relational queries.
+Key designs:
+  1. Speculative Parallel Execution — vector search + classifier fire simultaneously.
+  2. Heuristic Pre-classifier — zero-cost regex for obvious query types.
+  3. Graph+Vector Fusion — graph context is combined with vector results in the prompt.
+  4. Multi-hop Decomposition — complex queries are split into sub-queries.
 """
 import re
 import time
@@ -25,8 +25,17 @@ from ragbox.utils.llm_clients import LLMClient
 _GRAPH_PATTERNS = re.compile(
     r"\b(who does .+ report to|how does .+ relate|what connects|"
     r"relationship between|links? between|responsible for both|"
-    r"who (?:manages|owns|leads|oversees) .+ and who|"
-    r"what (?:went wrong|happened|caused) .+ and who)\b",
+    r"who (?:manages|owns|leads|oversees) .+ (?:and|who)|"
+    r"what (?:went wrong|happened|caused) .+ (?:and|who)|"
+    r"how .+ (?:affect|impact|influence|relate to) .+|"
+    r"what is the (?:connection|link|relationship) between)\b",
+    re.IGNORECASE,
+)
+
+_MULTI_HOP_PATTERNS = re.compile(
+    r"\b((?:and\s+(?:what|how|who|which))|"
+    r"(?:what .{5,30} and .{5,30}\?)|"
+    r"(?:how many .{5,30} and .{5,30}))\b",
     re.IGNORECASE,
 )
 
@@ -36,7 +45,6 @@ _MULTI_QUERY_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-# Simple factual: short, starts with what/how many/when/where, no cross-doc signals
 _FACTUAL_SIMPLE = re.compile(
     r"^(what is|what are|how many|how much|when|where|who is|"
     r"what was|what were|list|define|describe)\b.{0,80}$",
@@ -45,26 +53,26 @@ _FACTUAL_SIMPLE = re.compile(
 
 
 def _heuristic_classify(query: str) -> Optional[RAGStrategy]:
-    """
-    Zero-cost pre-classifier. Returns a strategy when confidence is high,
-    or None to fall back to the LLM classifier.
-    """
+    """Zero-cost pre-classifier. Returns a strategy or None for LLM fallback."""
     q = query.strip()
 
     if _GRAPH_PATTERNS.search(q):
         logger.debug("Heuristic: GRAPH (relationship signal detected)")
         return RAGStrategy.GRAPH
 
+    if _MULTI_HOP_PATTERNS.search(q):
+        logger.debug("Heuristic: MULTI_QUERY (multi-hop signal detected)")
+        return RAGStrategy.MULTI_QUERY
+
     if _MULTI_QUERY_PATTERNS.search(q):
         logger.debug("Heuristic: MULTI_QUERY (comparison signal detected)")
         return RAGStrategy.MULTI_QUERY
 
-    # Short factual queries with no cross-document signals
     if _FACTUAL_SIMPLE.match(q) and len(q.split()) <= 12:
-        logger.debug("Heuristic: VECTOR (short factual query, skipping LLM classify)")
+        logger.debug("Heuristic: VECTOR (short factual query)")
         return RAGStrategy.VECTOR
 
-    return None  # Uncertain — hand off to LLM classifier
+    return None
 
 
 class AgenticOrchestrator:
@@ -83,66 +91,80 @@ class AgenticOrchestrator:
     async def _classify_query(self, query: str) -> RAGStrategy:
         """LLM-based query classifier. Only called when heuristic is uncertain."""
         schema = {
-            "strategy": "vector | agentic | graph | multi_query",
+            "strategy": "vector | graph | multi_query",
             "reasoning": "string",
         }
-        prompt = f"""
-        Classify this query into one of the following retrieval strategies based on intent:
-        - 'vector': General semantic search, asking "What is X?"
-        - 'graph': Relationships, connections ("How does X relate to Y?")
-        - 'multi_query': Broad comparisons, multi-step ("Compare A and B", "How do I deploy?")
-        - 'agentic': Complex reasoning requiring outside tool usage or sequence of thoughts.
-
-        Query: {query}
-        """
-
+        prompt = (
+            f"Classify this query into a retrieval strategy:\n"
+            f"- 'vector': Simple factual lookup (\"What is X?\", \"How many Y?\")\n"
+            f"- 'graph': Questions about relationships, connections, or cross-topic "
+            f"reasoning (\"How does X relate to Y?\", \"Who manages X?\")\n"
+            f"- 'multi_query': Complex queries needing multiple perspectives, "
+            f"comparisons, or multi-step reasoning (\"Compare A and B\", "
+            f"\"What is X and how does it affect Y?\")\n\n"
+            f"Query: {query}"
+        )
         try:
             res = await self.llm.agenerate_structured(prompt, schema)
-            strategy_str = res.get("strategy", "vector").lower()
-            if strategy_str == "graph":
-                return RAGStrategy.GRAPH
-            elif strategy_str == "agentic":
-                return RAGStrategy.AGENTIC
-            elif strategy_str == "multi_query":
-                return RAGStrategy.MULTI_QUERY
-            return RAGStrategy.VECTOR
+            strategy_str = res.get("strategy", "vector").lower().strip()
+            mapping = {
+                "graph": RAGStrategy.GRAPH,
+                "multi_query": RAGStrategy.MULTI_QUERY,
+            }
+            return mapping.get(strategy_str, RAGStrategy.VECTOR)
         except Exception as e:
             logger.warning(f"Classification failed: {e}. Defaulting to VECTOR.")
             return RAGStrategy.VECTOR
 
     async def _expand_query(self, query: str) -> list[str]:
         """Expand one query into multiple semantic variations."""
-        prompt = f"""
-        Generate 3 distinct semantic variations of this query to improve search recall. 
-        Return ONLY the queries separated by newlines.
-        Query: {query}
-        """
+        prompt = (
+            f"Generate 3 distinct semantic variations of this query to improve "
+            f"search recall. Return ONLY the queries separated by newlines.\n"
+            f"Query: {query}"
+        )
         try:
             res = await self.llm.agenerate(
                 prompt, system="You are an expert search query generator."
             )
             queries = [q.strip("- \t1234567890.") for q in res.split("\n") if q.strip()]
-            queries = [q for q in queries if q]
-            if not queries:
-                return [query]
-            return queries[:3]
+            queries = [q for q in queries if q and len(q) > 5]
+            return queries[:3] if queries else [query]
         except Exception as e:
             logger.warning(f"Multi-query expansion failed: {e}")
             return [query]
+
+    async def _decompose_query(self, query: str) -> list[str]:
+        """
+        Decompose a multi-hop query into atomic sub-queries.
+        E.g. "How many engineers and what % are senior?" →
+             ["How many engineers?", "What percentage are senior?"]
+        """
+        prompt = (
+            f"Break this complex question into 2-3 simple, self-contained "
+            f"sub-questions. Each sub-question should be answerable independently.\n"
+            f"Return ONLY the sub-questions, one per line.\n\n"
+            f"Question: {query}"
+        )
+        try:
+            res = await self.llm.agenerate(
+                prompt,
+                system="You decompose complex questions into simple sub-questions.",
+            )
+            subs = [q.strip("- \t1234567890.") for q in res.split("\n") if q.strip()]
+            subs = [q for q in subs if q and len(q) > 5]
+            return subs[:4] if subs else [query]
+        except Exception as e:
+            logger.warning(f"Query decomposition failed: {e}")
+            return [query]
+
+    # ── Main Execute ──────────────────────────────────────────────────────
 
     async def execute(
         self, query_text: str, force_strategy: Optional[RAGStrategy] = None
     ) -> Answer:
         """
         Execute the end-to-end RAG pipeline with speculative parallel execution.
-
-        Strategy:
-          1. Run heuristic pre-classifier (zero cost).
-          2. If heuristic is certain → skip LLM classify entirely.
-          3. If heuristic is uncertain → fire vector search + LLM classifier
-             IN PARALLEL using asyncio.gather (speculative execution).
-          4. Route answer using whichever strategy was chosen.
-             On VECTOR path: results are already waiting from step 3 — zero overhead.
         """
         start_time = time.time()
 
@@ -151,34 +173,27 @@ class AgenticOrchestrator:
             speculative_sources = None
             heuristic_was_vector = False
         else:
-            # ── Phase 1: heuristic (free) ────────────────────────────────────
             heuristic = _heuristic_classify(query_text)
 
             if heuristic is not None:
-                # High confidence — skip LLM classifier entirely
                 strategy = heuristic
                 speculative_sources = None
                 heuristic_was_vector = heuristic == RAGStrategy.VECTOR
                 logger.info(
-                    f"Heuristic classified '{query_text[:50]}' as {strategy.name} "
+                    f"Heuristic: '{query_text[:50]}' → {strategy.name} "
                     f"(LLM classify skipped)"
                 )
             else:
-                # ── Phase 2: speculative parallel execution ──────────────────
-                # Fire vector search AND LLM classifier simultaneously.
-                # If strategy comes back VECTOR, results are already ready.
                 logger.info(
                     f"Heuristic uncertain for '{query_text[:50]}' — "
-                    f"launching speculative parallel execution"
+                    f"speculative parallel execution"
                 )
                 (strategy, speculative_sources) = await asyncio.gather(
                     self._classify_query(query_text),
                     self.retriever.retrieve(query_text),
                 )
                 heuristic_was_vector = False
-                logger.info(
-                    f"Speculative results ready — classifier chose {strategy.name}"
-                )
+                logger.info(f"Speculative done — classifier chose {strategy.name}")
 
         logger.info(f"Executing '{query_text[:60]}' with strategy {strategy.name}")
 
@@ -189,8 +204,6 @@ class AgenticOrchestrator:
         elif strategy == RAGStrategy.MULTI_QUERY:
             answer = await self._execute_multi_query(query_text)
         else:
-            # VECTOR — reuse speculative results if available
-            # Pass fast_mode=True if heuristic confidently identified this as simple factual
             answer = await self._execute_vector(
                 query_text,
                 prefetched_sources=speculative_sources,
@@ -201,57 +214,40 @@ class AgenticOrchestrator:
         return answer
 
     async def stream_execute(self, query_text: str):
-        """Stream the answer token-by-token. Retrieves context first, then streams."""
+        """Stream the answer token-by-token."""
         heuristic = _heuristic_classify(query_text)
-        if heuristic is not None:
-            strategy = heuristic
-        else:
-            strategy = await self._classify_query(query_text)
+        strategy = heuristic if heuristic is not None else await self._classify_query(query_text)
 
-        logger.info(
-            f"Streaming query '{query_text[:60]}' with strategy {strategy.name}"
-        )
+        logger.info(f"Streaming '{query_text[:60]}' with strategy {strategy.name}")
 
         if strategy == RAGStrategy.MULTI_QUERY:
-            expanded_queries = await self._expand_query(query_text)
-            all_sources = []
-            for q in [query_text] + expanded_queries:
-                q_sources = await self.retriever.retrieve(q, top_k=3)
-                all_sources.extend(q_sources)
-            seen = set()
-            sources = []
-            for s in all_sources:
-                if s.text not in seen:
-                    seen.add(s.text)
-                    sources.append(s)
-            sources = sources[:10]
+            sources = await self._gather_multi_query_sources(query_text)
+        elif strategy == RAGStrategy.GRAPH:
+            sources = await self._gather_graph_sources(query_text)
         else:
             sources = await self.retriever.retrieve(query_text)
 
         context = "\n\n---\n\n".join([s.text for s in sources])
-        prompt = f"Answer the query based ONLY on the following context.\n\nContext:\n{context}\n\nQuery: {query_text}"
+        prompt = (
+            f"Answer the query based ONLY on the following context.\n\n"
+            f"Context:\n{context}\n\nQuery: {query_text}"
+        )
         system = "You are an expert Q&A engine. Be concise and accurate."
 
         async for chunk in self.llm.astream(prompt, system=system):
             yield chunk
 
+    # ── Strategy Executors ────────────────────────────────────────────────
+
     async def _execute_vector(
         self, query: str, prefetched_sources=None, fast_mode: bool = False
     ) -> Answer:
         """
-        Vector path — two sub-modes:
-
-        fast_mode=True  (heuristic-VECTOR): Direct top-5 vector, no reranking.
-                        Uses a precision *extraction* prompt: one-sentence fact extract.
-                        Produces concise answers that score higher on semantic similarity.
-
-        fast_mode=False (LLM-classified or speculative): Full pipeline via retriever.
-                        Uses an open-ended generation prompt for richer answers.
+        Vector path with precision prompting for factual queries.
         """
         if prefetched_sources is not None:
             sources = prefetched_sources
         elif fast_mode:
-            # Fast path — lightweight retrieval, no reranking
             sources = await self.retriever.retrieve(query, top_k=5, fast_mode=True)
         else:
             sources = await self.retriever.retrieve(query)
@@ -259,15 +255,13 @@ class AgenticOrchestrator:
         context = "\n\n---\n\n".join([s.text for s in sources])
 
         if fast_mode:
-            # Precision extraction prompt — designed for concise factual answers
-            # that closely match ground-truth phrasing
             prompt = (
                 f"Read the context below and extract the single most relevant fact "
                 f"that directly answers the question. "
                 f"Answer in ONE concise sentence. Do not add explanation.\n\n"
                 f"Context:\n{context}\n\nQuestion: {query}"
             )
-            system = "You are a precise fact extractor. Extract the exact answer. One sentence only."
+            system = "You are a precise fact extractor. One sentence only."
         else:
             prompt = (
                 f"Answer the query based ONLY on the following context.\n\n"
@@ -276,95 +270,199 @@ class AgenticOrchestrator:
             system = "You are an expert Q&A engine. Be concise and accurate."
 
         response = await self.llm.agenerate(prompt, system=system)
-
         return Answer(
-            query=query,
-            content=response,
-            sources=sources,
-            strategy_used=RAGStrategy.VECTOR,
-        )
-
-    async def _execute_multi_query(self, query: str) -> Answer:
-        expanded_queries = await self._expand_query(query)
-        logger.info(f"Expanded initial query into: {expanded_queries}")
-
-        all_sources = []
-        for q in [query] + expanded_queries:
-            q_sources = await self.retriever.retrieve(q, top_k=3)
-            all_sources.extend(q_sources)
-
-        seen = set()
-        unique_sources = []
-        for s in all_sources:
-            if s.text not in seen:
-                seen.add(s.text)
-                unique_sources.append(s)
-        unique_sources = unique_sources[:10]
-
-        context = "\n\n---\n\n".join([s.text for s in unique_sources])
-        prompt = (
-            f"Answer the query comprehensively based ONLY on the following context "
-            f"derived from multi-query expansion.\n\nContext:\n{context}\n\nQuery: {query}"
-        )
-        response = await self.llm.agenerate(
-            prompt,
-            system="You are an expert Q&A engine analyzing across multiple perspectives.",
-        )
-
-        return Answer(
-            query=query,
-            content=response,
-            sources=unique_sources,
-            strategy_used=RAGStrategy.MULTI_QUERY,
+            query=query, content=response,
+            sources=sources, strategy_used=RAGStrategy.VECTOR,
         )
 
     async def _execute_graph(self, query: str) -> Answer:
-        sources = await self.retriever.retrieve(query)
+        """
+        Graph path — combines vector results WITH graph context.
+
+        The key insight: don't choose between vector and graph.
+        Use BOTH. Vector provides document chunks, graph provides
+        entity relationships and cross-document connections.
+        """
+        sources = await self._gather_graph_sources(query)
         context = "\n\n---\n\n".join([s.text for s in sources])
 
         prompt = (
-            f"Answer this query using the graph summaries and retrieved text provided below:"
-            f"\n\nContext:\n{context}\n\nQuery: {query}"
+            f"Answer this query using ALL of the following context. The context "
+            f"includes both document excerpts and knowledge graph information "
+            f"(entity relationships, descriptions, and community summaries). "
+            f"Use the graph information to reason about relationships and "
+            f"connections between entities.\n\n"
+            f"Context:\n{context}\n\nQuery: {query}"
         )
         response = await self.llm.agenerate(
-            prompt, system="You are a graph-aware reasoning agent."
+            prompt,
+            system=(
+                "You are a graph-aware reasoning engine. Use entity relationships "
+                "and document context together to give precise answers about "
+                "connections, hierarchies, and cross-document relationships."
+            ),
+        )
+        return Answer(
+            query=query, content=response,
+            sources=sources, strategy_used=RAGStrategy.GRAPH,
         )
 
+    async def _execute_multi_query(self, query: str) -> Answer:
+        """
+        Multi-query path with query decomposition for multi-hop reasoning.
+
+        1. Decompose query into sub-queries
+        2. Also expand with semantic variations
+        3. Retrieve for all sub-queries + expansions
+        4. Deduplicate and synthesize
+        """
+        sources = await self._gather_multi_query_sources(query)
+        context = "\n\n---\n\n".join([s.text for s in sources])
+
+        prompt = (
+            f"Answer the following complex question comprehensively using ALL "
+            f"the context below. The context was gathered from multiple search "
+            f"perspectives to ensure completeness. Synthesize information from "
+            f"different parts of the context to build a complete answer.\n\n"
+            f"Context:\n{context}\n\nQuestion: {query}"
+        )
+        response = await self.llm.agenerate(
+            prompt,
+            system=(
+                "You are an expert at synthesizing information from multiple "
+                "sources. Combine facts from different parts of the context to "
+                "answer complex, multi-part questions thoroughly."
+            ),
+        )
         return Answer(
-            query=query,
-            content=response,
-            sources=sources,
-            strategy_used=RAGStrategy.GRAPH,
+            query=query, content=response,
+            sources=sources, strategy_used=RAGStrategy.MULTI_QUERY,
         )
 
     async def _execute_agentic(self, query: str) -> Answer:
-        history = []
-        max_steps = 3
-        sources = []
+        """
+        Agentic path — iterative retrieval with reasoning.
+        Uses structured search-then-reason loops with actual context accumulation.
+        """
+        accumulated_context = []
+        all_sources = []
+        max_steps = 4
+
+        # Step 0: Initial broad retrieval
+        initial_sources = await self.retriever.retrieve(query, top_k=5)
+        all_sources.extend(initial_sources)
+        accumulated_context.extend([s.text for s in initial_sources])
 
         for step in range(max_steps):
-            prompt = f"Query: {query}\nHistory: {history}\n\nAction (SEARCH <term> or ANSWER <final answer>):"
+            context_so_far = "\n---\n".join(accumulated_context[-10:])
+            prompt = (
+                f"You are investigating this question: {query}\n\n"
+                f"Context gathered so far:\n{context_so_far}\n\n"
+                f"Based on this context, do you have enough information to "
+                f"answer the question fully?\n"
+                f"If YES, respond with: ANSWER: <your complete answer>\n"
+                f"If NO, respond with: SEARCH: <specific search term to find "
+                f"missing information>"
+            )
             action = await self.llm.agenerate(
-                prompt, system="You are a ReAct agent. You can SEARCH or ANSWER."
+                prompt,
+                system="You are a research agent. Decide if you need more info or can answer.",
             )
 
-            if "ANSWER" in action:
-                final_ans = action.split("ANSWER")[-1].strip(": \n")
+            if "ANSWER:" in action:
+                final_ans = action.split("ANSWER:", 1)[-1].strip()
                 return Answer(
-                    query=query,
-                    content=final_ans,
-                    sources=sources,
-                    strategy_used=RAGStrategy.AGENTIC,
+                    query=query, content=final_ans,
+                    sources=all_sources, strategy_used=RAGStrategy.AGENTIC,
                 )
-            elif "SEARCH" in action:
-                search_term = action.split("SEARCH")[-1].strip(": \n")
-                step_sources = await self.retriever.retrieve(search_term, top_k=2)
-                sources.extend(step_sources)
-                context = "\n".join([s.text for s in step_sources])
-                history.append(
-                    f"Searched: {search_term}\nFound context length: {len(context)}"
-                )
+            elif "SEARCH:" in action:
+                search_term = action.split("SEARCH:", 1)[-1].strip()
+                if search_term:
+                    step_sources = await self.retriever.retrieve(search_term, top_k=3)
+                    all_sources.extend(step_sources)
+                    accumulated_context.extend([s.text for s in step_sources])
             else:
                 break
 
-        return await self._execute_vector(query)
+        # Fallback: synthesize from everything we gathered
+        final_context = "\n\n---\n\n".join(
+            [s.text for s in all_sources[:15]]
+        )
+        response = await self.llm.agenerate(
+            f"Answer this question using the context below.\n\n"
+            f"Context:\n{final_context}\n\nQuestion: {query}",
+            system="You are an expert Q&A engine. Be thorough and accurate.",
+        )
+        return Answer(
+            query=query, content=response,
+            sources=all_sources, strategy_used=RAGStrategy.AGENTIC,
+        )
+
+    # ── Source Gathering Helpers ──────────────────────────────────────────
+
+    async def _gather_graph_sources(self, query: str) -> list:
+        """Retrieve sources combining vector search with graph context."""
+        # Get graph context directly from the knowledge graph
+        graph_result = await self.kg.query(query)
+        graph_context = graph_result.synthesized_context if graph_result else ""
+
+        # Also get vector results
+        sources = await self.retriever.retrieve(query, top_k=5)
+
+        # Inject graph context as a high-priority source if non-trivial
+        if graph_context and len(graph_context) > 50:
+            from ragbox.models.queries import Source
+
+            graph_source = Source(
+                document_id="knowledge_graph",
+                text=graph_context,
+                score=1.0,
+            )
+            # Place graph context first, then vector results
+            sources = [graph_source] + [s for s in sources if s.text != graph_context]
+
+        return sources[:8]
+
+    async def _gather_multi_query_sources(self, query: str) -> list:
+        """Retrieve sources from decomposed sub-queries + semantic expansions."""
+        # Run decomposition and expansion in parallel
+        decomposed, expanded = await asyncio.gather(
+            self._decompose_query(query),
+            self._expand_query(query),
+        )
+
+        all_queries = [query] + decomposed + expanded
+        # Deduplicate queries
+        seen_q = {query}
+        unique_queries = [query]
+        for q in decomposed + expanded:
+            if q.lower() not in seen_q:
+                seen_q.add(q.lower())
+                unique_queries.append(q)
+
+        logger.info(f"Multi-query retrieval with {len(unique_queries)} queries")
+
+        # Retrieve for all queries (with concurrency limit)
+        all_sources = []
+        sem = asyncio.Semaphore(3)
+
+        async def _retrieve_one(q):
+            async with sem:
+                return await self.retriever.retrieve(q, top_k=3)
+
+        results = await asyncio.gather(*[_retrieve_one(q) for q in unique_queries])
+        for r in results:
+            all_sources.extend(r)
+
+        # Deduplicate by text content
+        seen = set()
+        unique_sources = []
+        for s in all_sources:
+            text_key = s.text[:200]  # Use prefix as dedup key
+            if text_key not in seen:
+                seen.add(text_key)
+                unique_sources.append(s)
+
+        # Sort by score descending
+        unique_sources.sort(key=lambda s: s.score, reverse=True)
+        return unique_sources[:12]
