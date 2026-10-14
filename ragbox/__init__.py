@@ -1,9 +1,4 @@
-"""
-RAGBox: Batteries-Included, Developer-Friendly Agentic RAG System.
-
-The RAG framework for people who don't want to think about RAG.
-Provides the public RAGBox class for one-line integrations.
-"""
+"""Live, citation-first repository retrieval for applications and coding agents."""
 
 import asyncio
 import threading
@@ -27,7 +22,7 @@ from ragbox.utils.vector_stores import VectorStoreAutoDetector
 
 class RAGBox:
     """
-    RAG-in-a-Box: Batteries-Included, Developer-Friendly Agentic RAG System.
+    A live hybrid retrieval and answer-generation engine over a local directory.
 
     Usage::
 

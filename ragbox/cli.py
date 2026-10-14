@@ -10,7 +10,7 @@ from ragbox.config.defaults import Settings
 
 app = typer.Typer(
     name="ragbox",
-    help="RAGBox: The RAG framework for people who don't want to think about RAG.",
+    help="Live, citation-first retrieval over local code and documents.",
     add_completion=False,
 )
 

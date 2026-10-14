@@ -28,8 +28,8 @@ DOCUMENT_DIR = os.getenv("RAGBOX_DOCUMENT_DIR", "/data")
 
 app = FastAPI(
     title="RAGBox API",
-    description="The RAG framework for people who don't want to think about RAG.",
-    version="3.0.0",
+    description="Live, citation-first retrieval over local code and documents.",
+    version="3.0.1",
 )
 
 # Global RAGBox instance (initialized on startup)

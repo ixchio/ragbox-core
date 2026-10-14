@@ -1,7 +1,7 @@
 """
-Example 1: The 3-Line RAG App
+Example 1: Synchronous document query
 
-Compare this with the LangChain equivalent in ../COMPARISON.md — 31 lines vs 3.
+Minimal synchronous query example using the public Python API.
 """
 from ragbox import RAGBox
 
