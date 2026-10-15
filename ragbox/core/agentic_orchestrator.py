@@ -79,14 +79,23 @@ class AgenticOrchestrator:
     def __init__(
         self,
         retriever: RetrievalFusionEngine,
-        llm_client: LLMClient,
+        llm_client: Optional[LLMClient],
         document_processor: Any,
         knowledge_graph: Any,
     ):
         self.retriever = retriever
-        self.llm = llm_client
+        self._llm_client = llm_client
         self.doc_processor = document_processor
         self.kg = knowledge_graph
+
+    @property
+    def llm(self) -> LLMClient:
+        if self._llm_client is None:
+            raise RuntimeError(
+                "Answer generation requires an LLM. Retrieval-only APIs and MCP "
+                "search remain available without one."
+            )
+        return self._llm_client
 
     async def _classify_query(self, query: str) -> RAGStrategy:
         """LLM-based query classifier. Only called when heuristic is uncertain."""
@@ -500,6 +509,10 @@ class AgenticOrchestrator:
                 "metadata": {
                     "doc_id": source.document_id,
                     "chunk_id": source.chunk_id,
+                    "source_path": source.source_path,
+                    "revision_id": source.revision_id,
+                    "start_line": source.start_line,
+                    "end_line": source.end_line,
                 },
                 "score": source.score,
             }
@@ -510,6 +523,10 @@ class AgenticOrchestrator:
             Source(
                 document_id=item.get("metadata", {}).get("doc_id", "unknown"),
                 chunk_id=item.get("metadata", {}).get("chunk_id"),
+                source_path=item.get("metadata", {}).get("source_path"),
+                revision_id=item.get("metadata", {}).get("revision_id"),
+                start_line=item.get("metadata", {}).get("start_line"),
+                end_line=item.get("metadata", {}).get("end_line"),
                 text=item.get("content", ""),
                 score=item.get("cross_encoder_score", item.get("score", 0.0)),
             )

@@ -33,7 +33,7 @@ class RetrievalFusionEngine:
         vector_store: VectorStore,
         knowledge_graph: OptimizedKnowledgeGraph,
         embedding_provider: EmbeddingProvider,
-        llm_client: LLMClient,
+        llm_client: Optional[LLMClient],
         sparse_search_fn: Optional[Callable[[str, int], list]] = None,
     ):
         self.vstore = vector_store

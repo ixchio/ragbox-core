@@ -8,9 +8,11 @@ from __future__ import annotations
 import os
 import asyncio
 import contextvars
+import importlib.util
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, Optional
 from loguru import logger
 
@@ -553,7 +555,7 @@ class LLMAutoDetector:
     """Auto-detects the best LLM provider available."""
 
     @staticmethod
-    def detect(config: Settings) -> LLMClient:
+    def detect(config: Settings) -> Optional[LLMClient]:
         budget = CostBudget(
             max_daily_cost=config.max_daily_cost_usd,
             max_query_cost=config.max_query_cost_usd,
@@ -582,22 +584,36 @@ class LLMAutoDetector:
             os.getenv("LOCAL_MODEL_PATH", "models/llama-3.1-8b-instruct.gguf"),
         )
 
-        if not os.path.exists(local_path):
-            logger.warning(
-                "\n" + "=" * 80 + "\n"
-                "⚠️  NO API KEYS DETECTED AND LOCAL LLM NOT FOUND! ⚠️\n"
-                "RAGBox tried to fall back to a local model, but the weights are missing.\n"
-                "To unlock the full power of RAGBox, set ONE of the following environment variables:\n"
-                "  - export OPENAI_API_KEY='your-key'\n"
-                "  - export ANTHROPIC_API_KEY='your-key'\n"
-                "  - export GROQ_API_KEY='your-key'\n"
-                f"Alternatively, download a GGUF model and place it at: {local_path}\n"
-                + "=" * 80
+        model_path = Path(local_path).expanduser()
+        if not model_path.is_file():
+            logger.info(
+                "No generation model configured; starting in offline retrieval-only "
+                f"mode because the local model does not exist: {model_path}"
             )
-        else:
-            logger.info("Falling back to local LLaMA.")
+            return None
 
-        return LlamaCppClient(model_path=local_path, budget=budget)
+        try:
+            llama_cpp_spec = importlib.util.find_spec("llama_cpp")
+        except (ImportError, ValueError):
+            llama_cpp_spec = None
+        if llama_cpp_spec is None:
+            logger.info(
+                "No generation model configured; starting in offline retrieval-only "
+                "mode because llama-cpp-python is not installed."
+            )
+            return None
+
+        logger.info("Falling back to local LLaMA.")
+        try:
+            return LlamaCppClient(model_path=str(model_path), budget=budget)
+        except ImportError:
+            # The module can disappear or fail to import after find_spec succeeds
+            # (for example, because a native shared library is unavailable).
+            logger.warning(
+                "llama-cpp-python could not be loaded; continuing in offline "
+                "retrieval-only mode."
+            )
+            return None
 
 
 __all__ = [

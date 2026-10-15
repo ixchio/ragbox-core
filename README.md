@@ -172,9 +172,9 @@ files -> parse -> chunk -> dense index ----\
 
 The checked-in CPU ablation uses 12 fixture documents and 18 exact, semantic,
 and relationship queries on an Intel i5-1135G7. In that run, `fast` retrieval
-reached `0.972 Recall@3` at `9.89 ms p50`; `full` kept the same Recall@3,
-improved `MRR@5` from `0.880` to `0.917`, and increased p50 latency to
-`463.17 ms` because of reranking.
+reached `0.972 Recall@3` at `16.57 ms p50`; `full` kept the same Recall@3,
+improved `MRR@5` from `0.880` to `0.889`, and increased p50 latency to
+`671.62 ms` because of reranking.
 
 These are local retrieval measurements, not an end-to-end answer-quality or
 competitor benchmark. See [BENCHMARKS.md](BENCHMARKS.md) for the environment,

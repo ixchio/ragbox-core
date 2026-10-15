@@ -12,11 +12,14 @@ from ragbox.core.agentic_orchestrator import AgenticOrchestrator
 from ragbox.core.chunking_engine import (
     AdaptiveChunker,
     ChunkingEngine,
+    FixedChunker,
     RecursiveChunker,
+    SentenceChunker,
 )
 from ragbox.core.document_processor import DocumentProcessorRouter
 from ragbox.core.knowledge_graph import OptimizedKnowledgeGraph
 from ragbox.core.retrieval_fusion import RetrievalFusionEngine
+from ragbox.core.reranker import CrossEncoderReranker
 from ragbox.core.self_healing import (
     ContentAddressedStorage,
     ProductionFileWatcher,
@@ -39,16 +42,22 @@ class MemoryVectorStore:
             self.documents[document["id"]] = document
 
     async def delete(self, ids=None, namespace=None, filter_dict=None):
+        def matches(metadata, condition):
+            if "$and" in condition:
+                return all(matches(metadata, item) for item in condition["$and"])
+            return all(
+                metadata.get(key)
+                == (value.get("$eq") if isinstance(value, dict) else value)
+                for key, value in condition.items()
+            )
+
         if ids:
             targets = set(ids)
         else:
             targets = {
                 doc_id
                 for doc_id, document in self.documents.items()
-                if all(
-                    document.get("metadata", {}).get(key) == value
-                    for key, value in (filter_dict or {}).items()
-                )
+                if matches(document.get("metadata", {}), filter_dict or {})
             }
         for doc_id in targets:
             self.documents.pop(doc_id, None)
@@ -79,6 +88,18 @@ class FakeChunker:
         return [
             TextChunk(
                 id=f"chunk-{document.id}",
+                document_id=document.id,
+                content=document.content,
+                metadata={"embedding": [1.0, 0.0], "strategy": "test"},
+            )
+        ]
+
+
+class PathAwareFakeChunker:
+    async def chunk(self, document: Document):
+        return [
+            TextChunk(
+                id=f"chunk-{document.path.name}-{document.id}",
                 document_id=document.id,
                 content=document.content,
                 metadata={"embedding": [1.0, 0.0], "strategy": "test"},
@@ -250,6 +271,49 @@ def test_fts_search_only_exposes_active_revision(tmp_path: Path):
     assert cas.search_fts("replacement_symbol") == []
 
 
+def test_fts_rows_are_scoped_by_revision_and_source_path(tmp_path: Path):
+    cas = ContentAddressedStorage(tmp_path / "state")
+    if not cas.sparse_search_available:
+        pytest.skip("Python sqlite3 was built without FTS5")
+
+    first = tmp_path / "first.py"
+    second = tmp_path / "second.py"
+    first.write_text("shared_identifier = 1")
+    second.write_text("shared_identifier = 1")
+    revision = cas.get_hash(first)
+    assert revision == cas.get_hash(second)
+    assert revision is not None
+
+    chunks = []
+    for index, source in enumerate((first, second), start=1):
+        chunks.append(
+            {
+                "id": f"chunk-{index}",
+                "content": "shared_identifier = 1",
+                "metadata": {
+                    "doc_id": revision,
+                    "revision_id": revision,
+                    "source_path": str(source.resolve()),
+                },
+            }
+        )
+    cas.index_fts_chunks(chunks)
+    cas.activate(first, revision)
+    cas.activate(second, revision)
+
+    assert {
+        hit["metadata"]["source_path"] for hit in cas.search_fts("shared_identifier")
+    } == {
+        str(first.resolve()),
+        str(second.resolve()),
+    }
+
+    cas.delete_fts_revision(revision, source_path=first)
+    assert [
+        hit["metadata"]["source_path"] for hit in cas.search_fts("shared_identifier")
+    ] == [str(second.resolve())]
+
+
 def test_graph_snapshot_serialization_cannot_advance_active_pointer(tmp_path: Path):
     cas = ContentAddressedStorage(tmp_path / "state")
     source = tmp_path / "doc.txt"
@@ -315,6 +379,94 @@ async def test_self_healer_replaces_and_deletes_complete_revision(tmp_path: Path
     assert vectors.documents == {}
     if healer.cas.sparse_search_available:
         assert healer.cas.search_fts("two") == []
+
+
+@pytest.mark.asyncio
+async def test_shared_content_survives_independent_update_and_delete(tmp_path: Path):
+    first = tmp_path / "first.py"
+    second = tmp_path / "second.py"
+    first.write_text("shared_identifier = 1")
+    second.write_text("shared_identifier = 1")
+    vectors = MemoryVectorStore()
+    graph = FakeKnowledgeGraph()
+    healer = SelfHealer(
+        document_dir=tmp_path,
+        document_processor=FakeProcessor(),
+        chunking_engine=PathAwareFakeChunker(),
+        vector_store=vectors,
+        knowledge_graph=graph,
+    )
+
+    await healer.handle_file_event("created_or_modified", first)
+    await healer.handle_file_event("created_or_modified", second)
+    shared_revision = healer.cas.get_recorded_hash(first)
+    assert shared_revision == healer.cas.get_recorded_hash(second)
+    assert shared_revision is not None
+    assert healer.cas.revision_reference_count(shared_revision) == 2
+    assert len(vectors.documents) == 2
+    assert set(graph.documents) == {shared_revision}
+    if healer.cas.sparse_search_available:
+        assert {
+            hit["metadata"]["source_path"]
+            for hit in healer.cas.search_fts("shared_identifier")
+        } == {
+            str(first.resolve()),
+            str(second.resolve()),
+        }
+
+    first.write_text("replacement_identifier = 2")
+    await healer.handle_file_event("created_or_modified", first)
+    replacement_revision = healer.cas.get_recorded_hash(first)
+    assert replacement_revision and replacement_revision != shared_revision
+    assert healer.cas.get_recorded_hash(second) == shared_revision
+    assert shared_revision in graph.documents
+    assert replacement_revision in graph.documents
+    assert {
+        (document["metadata"]["source_path"], document["metadata"]["revision_id"])
+        for document in vectors.documents.values()
+    } == {
+        (str(first.resolve()), replacement_revision),
+        (str(second.resolve()), shared_revision),
+    }
+    if healer.cas.sparse_search_available:
+        assert [
+            hit["metadata"]["source_path"]
+            for hit in healer.cas.search_fts("shared_identifier")
+        ] == [str(second.resolve())]
+
+    second.unlink()
+    await healer.handle_file_event("deleted", second)
+    assert shared_revision not in graph.documents
+    assert healer.cas.revision_reference_count(shared_revision) == 0
+    assert all(
+        document["metadata"]["revision_id"] != shared_revision
+        for document in vectors.documents.values()
+    )
+
+
+@pytest.mark.asyncio
+async def test_binary_replacement_is_skipped_and_removes_old_revision(tmp_path: Path):
+    source = tmp_path / "document.txt"
+    source.write_text("searchable_before_binary")
+    vectors = MemoryVectorStore()
+    graph = FakeKnowledgeGraph()
+    healer = SelfHealer(
+        document_dir=tmp_path,
+        document_processor=DocumentProcessorRouter(),
+        chunking_engine=PathAwareFakeChunker(),
+        vector_store=vectors,
+        knowledge_graph=graph,
+    )
+
+    await healer.handle_file_event("created_or_modified", source)
+    old_revision = healer.cas.get_recorded_hash(source)
+    assert old_revision is not None
+
+    source.write_bytes(b"header\x00binary payload")
+    assert await healer.handle_file_event("created_or_modified", source)
+    assert healer.cas.get_recorded_hash(source) is None
+    assert old_revision not in graph.documents
+    assert vectors.documents == {}
 
 
 @pytest.mark.asyncio
@@ -583,6 +735,32 @@ async def test_markdown_chunking_preserves_offsets_and_adds_index_only_headers()
     assert not chunks[0].content.startswith("[guide.md")
 
 
+@pytest.mark.parametrize(
+    "chunker",
+    [
+        FixedChunker(chunk_size=30, overlap=5),
+        SentenceChunker(max_sentences=2),
+        RecursiveChunker(chunk_size=30, overlap=5),
+    ],
+)
+def test_chunk_ids_include_source_path(chunker):
+    content = "First sentence. Second sentence. Third sentence with an identifier."
+    first = Document(
+        id="same-content-hash",
+        path=Path("/repo/one/__init__.py"),
+        content=content,
+        doc_type=DocumentType.CODE,
+    )
+    second = first.model_copy(update={"path": Path("/repo/two/__init__.py")})
+
+    first_ids = [chunk.id for chunk in chunker.chunk(first)]
+    second_ids = [chunk.id for chunk in chunker.chunk(second)]
+
+    assert first_ids
+    assert len(first_ids) == len(set(first_ids))
+    assert set(first_ids).isdisjoint(second_ids)
+
+
 @pytest.mark.asyncio
 async def test_document_router_skips_unknown_binary_files(tmp_path: Path):
     binary = tmp_path / "archive.unknown"
@@ -781,6 +959,81 @@ def test_rank_blending_and_graph_result_cap():
 
 
 @pytest.mark.asyncio
+async def test_reranker_respects_top_k_above_eight():
+    reranker = CrossEncoderReranker()
+    reranker._initialized = True
+    reranker._model = None
+    candidates = [
+        {
+            "id": f"candidate-{index}",
+            "content": f"content {index}",
+            "rrf_rank": index,
+        }
+        for index in range(12)
+    ]
+
+    results = await reranker.rerank("query", candidates, top_k=10)
+
+    assert len(results) == 10
+    assert [item["id"] for item in results] == [
+        f"candidate-{index}" for index in range(10)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_multi_query_rerank_preserves_complete_citation_metadata():
+    reranker = SimpleNamespace(rerank=AsyncMock(side_effect=lambda q, c, top_k: c))
+    retriever = SimpleNamespace(reranker=reranker)
+    llm = AsyncMock()
+    llm.agenerate.return_value = ""
+    orchestrator = AgenticOrchestrator(
+        retriever=retriever,
+        llm_client=llm,
+        document_processor=None,
+        knowledge_graph=None,
+    )
+    sources = [
+        Source(
+            document_id="revision-a",
+            chunk_id="chunk-a",
+            source_path="/repo/a.py",
+            revision_id="revision-a",
+            start_line=11,
+            end_line=15,
+            text="first source",
+            score=0.8,
+        ),
+        Source(
+            document_id="revision-b",
+            chunk_id="chunk-b",
+            source_path="/repo/b.py",
+            revision_id="revision-b",
+            start_line=21,
+            end_line=25,
+            text="second source",
+            score=0.7,
+        ),
+    ]
+
+    reranked = await orchestrator._gather_multi_query_sources(
+        "Compare the sources", prefetched_sources=sources
+    )
+
+    assert [
+        (
+            source.source_path,
+            source.revision_id,
+            source.start_line,
+            source.end_line,
+        )
+        for source in reranked
+    ] == [
+        ("/repo/a.py", "revision-a", 11, 15),
+        ("/repo/b.py", "revision-b", 21, 25),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_speculative_graph_retrieval_is_reused():
     class CountingRetriever:
         def __init__(self):
@@ -876,6 +1129,7 @@ async def test_async_query_waits_for_initial_build():
 
     rag.self_healer = FakeHealer()
     rag.orchestrator = SimpleNamespace(execute=execute)
+    rag.llm_client = SimpleNamespace()
     rag.document_dir = Path("/tmp/ragbox-test")
     rag._build_task = None
     rag._build_loop = None
@@ -894,3 +1148,142 @@ async def test_sync_query_refuses_active_event_loop():
     rag = object.__new__(RAGBox)
     with pytest.raises(RuntimeError, match="async equivalent"):
         rag.query("question")
+
+
+@pytest.mark.asyncio
+async def test_real_offline_restart_persists_dense_sparse_and_graph_indexes(
+    tmp_path: Path, monkeypatch
+):
+    for name in (
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GROQ_API_KEY",
+        "PINECONE_API_KEY",
+        "LOCAL_MODEL_PATH",
+        "CHROMA_DB_DIR",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    repository = tmp_path / "repository"
+    package_one = repository / "package_one"
+    package_two = repository / "package_two"
+    package_one.mkdir(parents=True)
+    package_two.mkdir(parents=True)
+
+    identical_python = (
+        'SHARED_BOOTSTRAP_TOKEN = "shared-registry"\n\n'
+        "class SharedRegistry:\n"
+        "    def register_shared_service(self):\n"
+        "        return SHARED_BOOTSTRAP_TOKEN\n"
+    )
+    first_init = package_one / "__init__.py"
+    second_init = package_two / "__init__.py"
+    first_init.write_text(identical_python)
+    second_init.write_text(identical_python)
+    (repository / "service.py").write_text(
+        "class PaymentGateway:\n"
+        "    def charge_invoice(self):\n"
+        "        return LedgerStore().record_payment()\n\n"
+        "class LedgerStore:\n"
+        "    def record_payment(self):\n"
+        '        return "PAYMENT_RECORDED"\n'
+    )
+    (repository / "architecture.md").write_text(
+        "# Runtime Ownership\n\n"
+        "The Platform Team owns the Payment Gateway. "
+        "The Payment Gateway connects to the Ledger Store.\n"
+    )
+    binary = repository / "payload.bin"
+    binary.write_bytes(b"header\x00binary-payload")
+
+    first: RAGBox | None = None
+    second: RAGBox | None = None
+    try:
+        first = RAGBox(repository)
+        await first.aready()
+        assert first.llm_client is None
+        assert first.is_ready
+        assert first.self_healer.cas.get_recorded_hash(binary) is None
+        shared_revision = first.self_healer.cas.get_recorded_hash(first_init)
+        assert shared_revision == first.self_healer.cas.get_recorded_hash(second_init)
+        assert shared_revision is not None
+        assert first.self_healer.cas.revision_reference_count(shared_revision) == 2
+
+        first_embedding = await first.embedding_provider.embed_query(
+            "SHARED_BOOTSTRAP_TOKEN SharedRegistry"
+        )
+        first_dense = await first.vector_store.search(
+            first_embedding, k=20, min_score=-1.0
+        )
+        first_dense_paths = {
+            result.metadata.get("source_path")
+            for result in first_dense
+            if "SHARED_BOOTSTRAP_TOKEN" in result.content
+            and first.self_healer.is_active_revision(
+                result.metadata.get("source_path", ""),
+                result.metadata.get("revision_id", ""),
+            )
+        }
+        assert first_dense_paths == {
+            str(first_init.resolve()),
+            str(second_init.resolve()),
+        }
+        if first.self_healer.cas.sparse_search_available:
+            assert {
+                hit["metadata"]["source_path"]
+                for hit in first.self_healer.cas.search_fts(
+                    "SHARED_BOOTSTRAP_TOKEN", limit=20
+                )
+            } == {str(first_init.resolve()), str(second_init.resolve())}
+
+        first_collection_count = first.vector_store._get_collection().count()
+        active_before_restart = first.self_healer.cas.active_revisions()
+        await first.aclose()
+
+        second = RAGBox(repository)
+        await second.aready()
+        assert second.llm_client is None
+        assert second.self_healer.cas.active_revisions() == active_before_restart
+        assert second.vector_store._get_collection().count() == first_collection_count
+        assert (repository / ".ragbox_state" / "chroma_db").is_dir()
+        assert not (tmp_path / "chroma_db").exists()
+
+        second_embedding = await second.embedding_provider.embed_query(
+            "SHARED_BOOTSTRAP_TOKEN SharedRegistry"
+        )
+        second_dense = await second.vector_store.search(
+            second_embedding, k=20, min_score=-1.0
+        )
+        assert {
+            result.metadata.get("source_path")
+            for result in second_dense
+            if "SHARED_BOOTSTRAP_TOKEN" in result.content
+            and second.self_healer.is_active_revision(
+                result.metadata.get("source_path", ""),
+                result.metadata.get("revision_id", ""),
+            )
+        } == {str(first_init.resolve()), str(second_init.resolve())}
+        if second.self_healer.cas.sparse_search_available:
+            assert {
+                hit["metadata"]["source_path"]
+                for hit in second.self_healer.cas.search_fts(
+                    "SHARED_BOOTSTRAP_TOKEN", limit=20
+                )
+            } == {str(first_init.resolve()), str(second_init.resolve())}
+
+        graph_result = await second.knowledge_graph.query(
+            "How does PaymentGateway relate to LedgerStore?"
+        )
+        assert graph_result.relevant_entities
+        assert {entity.name for entity in graph_result.relevant_entities} & {
+            "PaymentGateway",
+            "LedgerStore",
+        }
+        with pytest.raises(RuntimeError, match="Answer generation requires an LLM"):
+            await second.aquery("What owns the payment gateway?")
+    finally:
+        if second is not None:
+            await second.aclose()
+        if first is not None:
+            await first.aclose()

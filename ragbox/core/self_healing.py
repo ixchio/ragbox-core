@@ -31,7 +31,7 @@ class HealthIssue:
 class ContentAddressedStorage:
     """Revision pointers and revision-safe retrieval state backed by SQLite."""
 
-    INDEX_SCHEMA_VERSION = "5"
+    INDEX_SCHEMA_VERSION = "6"
     COMMUNITY_SUMMARIES_KEY = "graph_community_summaries"
 
     def __init__(self, storage_path: Path):
@@ -40,6 +40,7 @@ class ContentAddressedStorage:
         self.db_path = self.storage_path / "cas_state.db"
         self._cache_lock = threading.RLock()
         self._active_cache: Dict[str, str] = {}
+        self._stale_revision_ids: tuple[str, ...] = ()
         self._fts_enabled = False
         self._init_db()
 
@@ -75,7 +76,14 @@ class ContentAddressedStorage:
                 ("index_schema_version",),
             ).fetchone()
             schema_changed = row is None or row[0] != self.INDEX_SCHEMA_VERSION
+            stale_revision_ids = ()
             if schema_changed:
+                stale_revision_ids = tuple(
+                    revision_id
+                    for (revision_id,) in conn.execute(
+                        "SELECT DISTINCT hash_value FROM file_hashes"
+                    ).fetchall()
+                )
                 conn.execute("DROP TABLE IF EXISTS chunks_fts")
 
             try:
@@ -103,8 +111,8 @@ class ContentAddressedStorage:
                 )
             if schema_changed:
                 # Schema changes alter the retrieval/graph revision contract.
-                # Clearing activation pointers forces one safe rebuild while
-                # legacy vectors remain hidden by active-revision filtering.
+                # Clearing activation pointers forces one safe rebuild. The
+                # old vector revisions are returned for deletion at startup.
                 conn.execute("DELETE FROM file_hashes")
                 conn.execute("DELETE FROM graph_revisions")
                 if self._fts_enabled:
@@ -122,6 +130,7 @@ class ContentAddressedStorage:
             )
         with self._cache_lock:
             self._active_cache = active
+            self._stale_revision_ids = stale_revision_ids
 
     @staticmethod
     def _path_key(file_path: str | Path) -> str:
@@ -227,6 +236,13 @@ class ContentAddressedStorage:
         with self._cache_lock:
             return sum(value == revision_id for value in self._active_cache.values())
 
+    def consume_stale_revision_ids(self) -> tuple[str, ...]:
+        """Return vectors invalidated by a schema migration exactly once."""
+        with self._cache_lock:
+            revisions = self._stale_revision_ids
+            self._stale_revision_ids = ()
+        return revisions
+
     def load_active_graph_snapshots(self) -> list[Dict[str, Any]]:
         """Load exactly one graph contribution for every active revision."""
         with sqlite3.connect(self.db_path) as conn:
@@ -312,7 +328,9 @@ class ContentAddressedStorage:
                 chunk["id"],
                 chunk["metadata"].get("doc_id", ""),
                 chunk["metadata"].get("revision_id", ""),
-                chunk["metadata"].get("source_path", ""),
+                self._path_key(chunk["metadata"].get("source_path", ""))
+                if chunk["metadata"].get("source_path")
+                else "",
                 chunk["metadata"].get("start_line"),
                 chunk["metadata"].get("end_line"),
                 chunk.get("sparse_content", chunk.get("content", "")),
@@ -320,11 +338,13 @@ class ContentAddressedStorage:
             )
             for chunk in chunks
         ]
-        revision_ids = {row[2] for row in rows if row[2]}
+        revision_sources = {(row[2], row[3]) for row in rows if row[2] and row[3]}
         with sqlite3.connect(self.db_path) as conn:
-            for revision_id in revision_ids:
+            for revision_id, source_path in revision_sources:
                 conn.execute(
-                    "DELETE FROM chunks_fts WHERE revision_id = ?", (revision_id,)
+                    "DELETE FROM chunks_fts "
+                    "WHERE revision_id = ? AND source_path = ?",
+                    (revision_id, source_path),
                 )
             conn.executemany(
                 """
@@ -336,11 +356,22 @@ class ContentAddressedStorage:
                 rows,
             )
 
-    def delete_fts_revision(self, revision_id: str) -> None:
+    def delete_fts_revision(
+        self, revision_id: str, source_path: Optional[str | Path] = None
+    ) -> None:
         if not self._fts_enabled or not revision_id:
             return
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute("DELETE FROM chunks_fts WHERE revision_id = ?", (revision_id,))
+            if source_path is None:
+                conn.execute(
+                    "DELETE FROM chunks_fts WHERE revision_id = ?", (revision_id,)
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM chunks_fts "
+                    "WHERE revision_id = ? AND source_path = ?",
+                    (revision_id, self._path_key(source_path)),
+                )
 
     def delete_revision_artifacts(self, revision_id: str) -> bool:
         """Delete inactive SQLite artifacts; return False if still referenced."""
@@ -794,6 +825,8 @@ class SelfHealer:
         """Index every changed file and fail readiness if any revision fails."""
         logger.info(f"Starting initial build for {self.document_dir}")
         failures = []
+        for stale_revision_id in self.cas.consume_stale_revision_ids():
+            await self.vstore.delete(filter_dict={"doc_id": stale_revision_id})
         snapshots = self.cas.load_active_graph_snapshots()
         restore_snapshots = getattr(self.kg, "restore_snapshots", None)
         if snapshots and not callable(restore_snapshots):
@@ -896,6 +929,41 @@ class SelfHealer:
             return 0
         return await self.vstore.delete(filter_dict={"doc_id": revision_id})
 
+    async def _delete_path_revision(self, source_path: str, revision_id: str) -> int:
+        """Delete one path's artifacts without touching shared revision data."""
+        if not source_path or not revision_id:
+            return 0
+        self.cas.delete_fts_revision(revision_id, source_path=source_path)
+        return await self.vstore.delete(
+            filter_dict={
+                "$and": [
+                    {"source_path": {"$eq": source_path}},
+                    {"revision_id": {"$eq": revision_id}},
+                ]
+            }
+        )
+
+    async def _remove_active_path(self, path: Path, revision_id: str) -> int:
+        """Remove one active path while preserving shared content revisions."""
+        source_path = str(path.resolve(strict=False))
+        is_last_reference = self.cas.revision_reference_count(revision_id) <= 1
+        old_graph_snapshot = (
+            self.kg.snapshot_document(revision_id) if is_last_reference else None
+        )
+        with self.kg.mutation_lock():
+            try:
+                if is_last_reference:
+                    self.kg.remove_document(revision_id, optimize=True)
+                self.cas.remove(path)
+            except Exception:
+                if is_last_reference:
+                    self.kg.rollback_document_replacement("", old_graph_snapshot)
+                raise
+
+        if is_last_reference:
+            return await self._delete_revision(revision_id)
+        return await self._delete_path_revision(source_path, revision_id)
+
     async def _refresh_and_persist_graph_summaries(self) -> None:
         refresh = getattr(self.kg, "refresh_community_summaries", None)
         if callable(refresh):
@@ -927,23 +995,11 @@ class SelfHealer:
         if event_type == "deleted":
             if not old_hash:
                 return True
-            is_last_reference = self.cas.revision_reference_count(old_hash) <= 1
-            old_graph_snapshot = (
-                self.kg.snapshot_document(old_hash) if is_last_reference else None
-            )
-            with self.kg.mutation_lock():
-                try:
-                    if is_last_reference:
-                        self.kg.remove_document(old_hash, optimize=True)
-                    self.cas.remove(path)
-                except Exception:
-                    if is_last_reference:
-                        self.kg.rollback_document_replacement("", old_graph_snapshot)
-                    raise
-            removed = await self._delete_revision(old_hash) if is_last_reference else 0
-            if is_last_reference and removed == 0:
+            removed = await self._remove_active_path(path, old_hash)
+            if removed == 0:
                 logger.warning(
-                    f"No stored vectors reported for deleted revision {old_hash}"
+                    "No stored vectors reported for deleted path revision "
+                    f"{source_path} ({old_hash})"
                 )
             if not self._building_initial:
                 await self._refresh_and_persist_graph_summaries()
@@ -957,13 +1013,23 @@ class SelfHealer:
 
         try:
             document = await self.processor.process(path, new_hash)
-            if not document:
-                raise RuntimeError(f"No document produced for {path}")
+            if document is None:
+                logger.info(f"Skipping unsupported, empty, or binary file: {path}")
+                if old_hash:
+                    await self._remove_active_path(path, old_hash)
+                    if not self._building_initial:
+                        await self._refresh_and_persist_graph_summaries()
+                return True
 
-            chunks, prepared_graph = await asyncio.gather(
-                self.chunker.chunk(document),
-                self.kg.prepare_document(document),
-            )
+            new_revision_is_shared = self.cas.revision_reference_count(new_hash) > 0
+            if new_revision_is_shared:
+                chunks = await self.chunker.chunk(document)
+                prepared_graph = None
+            else:
+                chunks, prepared_graph = await asyncio.gather(
+                    self.chunker.chunk(document),
+                    self.kg.prepare_document(document),
+                )
             vectors_to_index = []
             for chunk in chunks:
                 if "embedding" in chunk.metadata:
@@ -998,14 +1064,22 @@ class SelfHealer:
                     f"of {len(chunks)} chunks in {path}"
                 )
 
-            old_graph_snapshot = self.kg.snapshot_document(old_hash)
+            old_is_last_reference = old_hash is not None and (
+                self.cas.revision_reference_count(old_hash) <= 1
+            )
+            old_graph_snapshot = (
+                self.kg.snapshot_document(old_hash) if old_is_last_reference else None
+            )
 
             if vectors_to_index:
                 try:
                     await self.vstore.add_documents(vectors_to_index)
                     self.cas.index_fts_chunks(vectors_to_index)
                 except Exception:
-                    await self._delete_revision(new_hash)
+                    if new_revision_is_shared:
+                        await self._delete_path_revision(source_path, new_hash)
+                    else:
+                        await self._delete_revision(new_hash)
                     raise
                 logger.info(f"Sent {len(chunks)} chunks to Vector DB for {path.name}")
 
@@ -1015,33 +1089,58 @@ class SelfHealer:
                 # critical section commits graph state and the CAS pointer.
                 with self.kg.mutation_lock():
                     try:
-                        self.kg.commit_prepared_document(
-                            document,
-                            prepared_graph,
-                            replace_doc_id=old_hash,
-                            optimize=True,
-                        )
-                        graph_snapshot = self.kg.snapshot_document(new_hash)
+                        if new_revision_is_shared:
+                            graph_snapshot = self.kg.snapshot_document(new_hash)
+                            if graph_snapshot is None:
+                                raise RuntimeError(
+                                    "Shared revision has no in-memory graph snapshot: "
+                                    f"{new_hash}"
+                                )
+                            if old_hash and old_is_last_reference:
+                                self.kg.remove_document(old_hash, optimize=True)
+                        else:
+                            assert prepared_graph is not None
+                            self.kg.commit_prepared_document(
+                                document,
+                                prepared_graph,
+                                replace_doc_id=(
+                                    old_hash if old_is_last_reference else None
+                                ),
+                                optimize=True,
+                            )
+                            graph_snapshot = self.kg.snapshot_document(new_hash)
                         if graph_snapshot is None:
                             raise RuntimeError(
                                 f"Knowledge graph did not produce snapshot {new_hash}"
                             )
                         self.cas.activate(path, new_hash, graph_snapshot)
                     except Exception:
-                        self.kg.rollback_document_replacement(
-                            new_hash, old_graph_snapshot
-                        )
+                        if new_revision_is_shared:
+                            if old_hash and old_is_last_reference:
+                                self.kg.rollback_document_replacement(
+                                    "", old_graph_snapshot
+                                )
+                        else:
+                            self.kg.rollback_document_replacement(
+                                new_hash, old_graph_snapshot
+                            )
                         raise
             except Exception:
-                await self._delete_revision(new_hash)
+                if new_revision_is_shared:
+                    await self._delete_path_revision(source_path, new_hash)
+                else:
+                    await self._delete_revision(new_hash)
                 raise
 
             if old_hash and old_hash != new_hash:
-                removed = await self._delete_revision(old_hash)
+                if self.cas.revision_reference_count(old_hash) == 0:
+                    removed = await self._delete_revision(old_hash)
+                else:
+                    removed = await self._delete_path_revision(source_path, old_hash)
                 if removed == 0:
                     logger.warning(
-                        f"Old revision {old_hash} is inactive but its vector "
-                        "store did not report a deletion"
+                        f"Old path revision {source_path} ({old_hash}) is inactive "
+                        "but its vector store did not report a deletion"
                     )
 
             if not self._building_initial:

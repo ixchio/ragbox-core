@@ -1,6 +1,6 @@
 [project]
 name = "ragbox-core"
-version = "3.0.1"
+version = "3.0.2"
 description = "Live repository retrieval for coding agents, with hybrid search, symbol graphs, and exact file:line citations."
 authors = [{ name = "QueryX Labs", email = "amankumarpandeyin@gmail.com" }]
 readme = "README.md"
@@ -29,7 +29,7 @@ dependencies = [
     "numpy>=2.1,<3.0; python_version >= '3.13'",
     "scipy>=1.11,<2.0",
     "loguru>=0.7,<0.8",
-    "typer>=0.9,<0.10",
+    "typer>=0.16.1,<1.0",
     "rich>=13.0,<14.0",
     "python-dotenv",
     "tenacity",

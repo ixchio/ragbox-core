@@ -52,19 +52,19 @@ three times per mode.
 
 | Retrieval mode | Recall@3 | MRR@5 | p50 | p95 |
 |---|---:|---:|---:|---:|
-| Dense-only (Chroma + BGE-small) | 0.917 | 0.894 | 9.53 ms | 11.62 ms |
-| Sparse-only (SQLite FTS5 BM25) | 0.889 | 0.889 | 0.62 ms | 1.17 ms |
-| Fast (dense + FTS5 RRF) | **0.972** | 0.880 | **9.89 ms** | **13.60 ms** |
-| Tri-modal fast (dense + FTS5 + graph RRF) | **0.972** | 0.880 | 10.98 ms | 14.23 ms |
-| Full (tri-modal + rank-fused CPU cross-encoder) | **0.972** | **0.917** | 463.17 ms | 587.47 ms |
+| Dense-only (Chroma + BGE-small) | 0.917 | 0.894 | 12.60 ms | 20.68 ms |
+| Sparse-only (SQLite FTS5 BM25) | 0.889 | 0.889 | 0.99 ms | 2.35 ms |
+| Fast (dense + FTS5 RRF) | **0.972** | 0.880 | 16.57 ms | 44.63 ms |
+| Tri-modal fast (dense + FTS5 + graph RRF) | **0.972** | 0.880 | 13.87 ms | 23.11 ms |
+| Full (tri-modal + rank-fused CPU cross-encoder) | **0.972** | **0.889** | 671.62 ms | 931.22 ms |
 
 | Retrieval mode | Embed p50 | Dense p50 | FTS5 p50 | Graph p50 | Fusion p50 | Rerank p50 |
 |---|---:|---:|---:|---:|---:|---:|
-| Dense-only | 6.24 ms | 2.94 ms | 0.00 ms | 0.00 ms | 0.00 ms | 0.00 ms |
-| Sparse-only | 0.00 ms | 0.00 ms | 0.59 ms | 0.00 ms | 0.00 ms | 0.00 ms |
-| Fast | 6.13 ms | 3.19 ms | 1.37 ms | 0.00 ms | 0.03 ms | 0.00 ms |
-| Tri-modal fast | 6.47 ms | 3.62 ms | 1.35 ms | 0.42 ms | 0.08 ms | 0.00 ms |
-| Full | 7.49 ms | 6.47 ms | 1.94 ms | 0.45 ms | 0.11 ms | 447.63 ms |
+| Dense-only | 7.95 ms | 4.12 ms | 0.00 ms | 0.00 ms | 0.00 ms | 0.00 ms |
+| Sparse-only | 0.00 ms | 0.00 ms | 0.96 ms | 0.00 ms | 0.00 ms | 0.00 ms |
+| Fast | 9.44 ms | 5.95 ms | 1.97 ms | 0.00 ms | 0.05 ms | 0.00 ms |
+| Tri-modal fast | 8.10 ms | 5.88 ms | 1.68 ms | 0.82 ms | 0.13 ms | 0.00 ms |
+| Full | 10.93 ms | 8.73 ms | 2.37 ms | 0.83 ms | 0.17 ms | 646.94 ms |
 
 | Retrieval mode | Exact Recall@3 | Semantic Recall@3 | Relationship Recall@3 |
 |---|---:|---:|---:|
@@ -75,8 +75,8 @@ three times per mode.
 | Full | 1.000 | 0.917 | 1.000 |
 
 Fast, tri-modal fast, and Full all reached 0.972 Recall@3. Full improved MRR@5
-over the two hybrid modes, but its median cross-encoder stage was 447.63 ms and
-its overall p50 latency was 463.17 ms. This result does not justify a blanket
+over the two hybrid modes, but its median cross-encoder stage was 646.94 ms and
+its overall p50 latency was 671.62 ms. This result does not justify a blanket
 claim that reranking or graph retrieval improves every query.
 
 Run `poetry run python benchmarks/ablation_cpu.py` to reproduce it. Raw output:

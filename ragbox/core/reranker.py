@@ -52,9 +52,11 @@ class CrossEncoderReranker:
         if not self._initialized:
             await asyncio.to_thread(self._init_model)
 
+        candidate_limit = max(8, top_k)
+        candidate_pool = candidates[:candidate_limit]
         if not self._model or not candidates:
             # Preserve RRF order when the optional model is unavailable.
-            fallback = sorted(candidates[:8], key=lambda item: item.get("rrf_rank", 0))
+            fallback = sorted(candidate_pool, key=lambda item: item.get("rrf_rank", 0))
             for doc in fallback:
                 doc["ce_rank"] = doc.get("rrf_rank", 0)
             return fallback[:top_k]
@@ -64,7 +66,7 @@ class CrossEncoderReranker:
             documents = []
             valid_candidates = []
 
-            for doc in candidates[:8]:
+            for doc in candidate_pool:
                 content = doc.get("content", "")
                 if content:
                     documents.append(content[:1200])

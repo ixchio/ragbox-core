@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
 import os
 import asyncio
+from pathlib import Path
 from loguru import logger
 
 from ragbox.config.defaults import Settings
@@ -60,8 +61,9 @@ class ChromaStore(VectorStore):
             import chromadb
             from chromadb.config import Settings
 
-            self.client = chromadb.Client(
-                Settings(persist_directory=persist_dir, anonymized_telemetry=False)
+            self.client = chromadb.PersistentClient(
+                path=persist_dir,
+                settings=Settings(anonymized_telemetry=False),
             )
             self._collections: Dict[str, Any] = {}
         except ImportError:
@@ -275,7 +277,11 @@ class PineconeStore(VectorStore):
 
 class VectorStoreAutoDetector:
     @staticmethod
-    def detect(config: Settings, embedding_provider: EmbeddingProvider) -> VectorStore:
+    def detect(
+        config: Settings,
+        embedding_provider: EmbeddingProvider,
+        document_dir: Optional[Path] = None,
+    ) -> VectorStore:
         pinecone_key = getattr(
             config, "pinecone_api_key", os.getenv("PINECONE_API_KEY")
         )
@@ -298,6 +304,9 @@ class VectorStoreAutoDetector:
         chroma_dir = getattr(
             config, "chroma_db_dir", os.getenv("CHROMA_DB_DIR", "./chroma_db")
         )
+        default_chroma_dir = Settings.model_fields["chroma_db_dir"].default
+        if document_dir is not None and chroma_dir == default_chroma_dir:
+            chroma_dir = str(document_dir / ".ragbox_state" / "chroma_db")
         return ChromaStore(persist_dir=chroma_dir)
 
 

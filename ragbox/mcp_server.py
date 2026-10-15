@@ -29,7 +29,7 @@ VALID_SEARCH_MODES = frozenset({"fast", "tri_modal_fast", "full"})
 try:
     SERVER_VERSION = version("ragbox-core")
 except PackageNotFoundError:
-    SERVER_VERSION = "3.0.1"
+    SERVER_VERSION = "3.0.2"
 
 SERVER_INFO = {"name": SERVER_NAME, "version": SERVER_VERSION}
 SERVER_INFO_META_KEY = "io.modelcontextprotocol/serverInfo"

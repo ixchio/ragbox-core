@@ -16,7 +16,7 @@ from ragbox.core.retrieval_fusion import RetrievalFusionEngine
 from ragbox.core.self_healing import SelfHealer
 from ragbox.models.queries import Answer
 from ragbox.utils.embeddings import EmbeddingAutoDetector
-from ragbox.utils.llm_clients import LLMAutoDetector
+from ragbox.utils.llm_clients import LLMClient, LLMAutoDetector
 from ragbox.utils.vector_stores import VectorStoreAutoDetector
 
 
@@ -44,14 +44,16 @@ class RAGBox:
             document_dir: Path to the directory containing documents.
             config: Optional configuration overrides.
         """
-        self.document_dir = Path(document_dir)
+        self.document_dir = Path(document_dir).expanduser().resolve(strict=False)
         self.config = config or Settings()
 
         # Initialize Core Layers Auto-magically
-        self.llm_client = LLMAutoDetector.detect(self.config)
+        self.llm_client: Optional[LLMClient] = LLMAutoDetector.detect(self.config)
         self.embedding_provider = EmbeddingAutoDetector.detect(self.config)
         self.vector_store = VectorStoreAutoDetector.detect(
-            self.config, self.embedding_provider
+            self.config,
+            self.embedding_provider,
+            document_dir=self.document_dir,
         )
 
         self.document_processor = DocumentProcessorRouter()
@@ -208,6 +210,17 @@ class RAGBox:
         await asyncio.sleep(0)
         await self.self_healer.flush_pending()
 
+    def _require_llm(self) -> LLMClient:
+        if self.llm_client is None:
+            raise RuntimeError(
+                "Answer generation requires an LLM, but none is configured. "
+                "Offline indexing, retriever.retrieve(), and ragbox-mcp search "
+                "remain available. Set OPENAI_API_KEY, ANTHROPIC_API_KEY, or "
+                "GROQ_API_KEY, or install llama-cpp-python and configure an "
+                "existing local_model_path."
+            )
+        return self.llm_client
+
     def query(self, question: str) -> str:
         """
         Query the RAGBox system synchronously.
@@ -230,6 +243,7 @@ class RAGBox:
         Returns:
             The direct answer string.
         """
+        self._require_llm()
         await self._prepare_query()
         answer: Answer = await self.orchestrator.execute(question)
         return answer.content
@@ -249,6 +263,7 @@ class RAGBox:
         Yields:
             String chunks of the answer as they are generated.
         """
+        self._require_llm()
         await self._prepare_query()
         async for chunk in self.orchestrator.stream_execute(question):
             yield chunk
@@ -267,9 +282,7 @@ class RAGBox:
         """
         from ragbox.utils.cost_tracker import CostEstimator
 
-        model_name = (
-            self.llm_client._model if hasattr(self.llm_client, "_model") else "gpt-4o"
-        )
+        model_name = getattr(self.llm_client, "_model", "gpt-4o")
         estimator = CostEstimator(
             model_name if isinstance(model_name, str) else "gpt-4o"
         )

@@ -4,7 +4,6 @@ Entity extraction, Leiden/Louvain community detection, real graph traversal,
 and community summarization for cross-document reasoning.
 """
 
-from pathlib import Path
 from typing import List, Tuple, Dict, Any, Set, Optional
 import ast
 import asyncio
@@ -996,7 +995,7 @@ class OptimizedKnowledgeGraph:
             logger.warning("No LLM client — using regex-based entity extraction.")
             return self._extract_entities_regex(doc)
 
-        cache_dir = Path(".ragbox_state/graph_cache")
+        cache_dir = doc.path.parent / ".ragbox_state" / "graph_cache"
         cache_dir.mkdir(parents=True, exist_ok=True)
         doc_hash = hashlib.md5(doc.content.encode()).hexdigest()
         cache_file = cache_dir / f"{doc.id}_{doc_hash}.json"

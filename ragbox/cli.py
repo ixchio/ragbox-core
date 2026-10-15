@@ -60,7 +60,7 @@ def init(
         with console.status(
             "[bold green]Building Vector Store and Knowledge Graph...", spinner="dots"
         ):
-            pass  # It's already built by the init above
+            rg_pre.ready()
         console.print(
             "[bold green]✓ Indexing complete.[/bold green] RAGBox is ready for queries."
         )
@@ -77,6 +77,7 @@ def init(
                 # Wait forever
                 asyncio.run(asyncio.sleep(3600))
         except KeyboardInterrupt:
+            rg_pre.close()
             console.print("Daemon stopped.")
 
     except Exception as e:

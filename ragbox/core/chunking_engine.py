@@ -6,7 +6,7 @@ import re
 import hashlib
 import asyncio
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Optional
 from loguru import logger
 
 from ragbox.models.documents import Document, DocumentType
@@ -46,7 +46,9 @@ class FixedChunker(ChunkingStrategy):
             end = min(len(text), start + self.chunk_size)
             chunk_text = text[start:end]
             start_line, end_line = _line_span(text, start, end)
-            chunk_id = hashlib.sha256(f"{document.id}_{start}".encode()).hexdigest()
+            chunk_id = hashlib.sha256(
+                f"{document.path}_{document.id}_{start}".encode()
+            ).hexdigest()
             chunks.append(
                 TextChunk(
                     id=chunk_id,
@@ -101,7 +103,9 @@ class SentenceChunker(ChunkingStrategy):
                 start_idx = current_chunk[0][1]
                 end_idx = current_chunk[-1][2]
                 start_line, end_line = _line_span(text, start_idx, end_idx)
-                chunk_id = hashlib.sha256(f"{document.id}_{i}".encode()).hexdigest()
+                chunk_id = hashlib.sha256(
+                    f"{document.path}_{document.id}_{i}".encode()
+                ).hexdigest()
                 chunks.append(
                     TextChunk(
                         id=chunk_id,
@@ -158,7 +162,9 @@ class RecursiveChunker(ChunkingStrategy):
             source_start = max(0, start_idx - len(overlap_text))
             source_end = min(len(text), start_idx + len(raw_chunk))
             start_line, end_line = _line_span(text, source_start, source_end)
-            chunk_id = hashlib.sha256(f"{document.id}_{i}".encode()).hexdigest()
+            chunk_id = hashlib.sha256(
+                f"{document.path}_{document.id}_{i}".encode()
+            ).hexdigest()
             chunks.append(
                 TextChunk(
                     id=chunk_id,
@@ -288,7 +294,11 @@ class AdaptiveChunker:
 class ChunkingEngine:
     """Entry point for Layer 3."""
 
-    def __init__(self, llm_client: LLMClient, embedding_provider: EmbeddingProvider):
+    def __init__(
+        self,
+        llm_client: Optional[LLMClient],
+        embedding_provider: EmbeddingProvider,
+    ):
         self.llm = llm_client
         self.embedding_provider = embedding_provider
         self.chunker = AdaptiveChunker()
