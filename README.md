@@ -11,6 +11,8 @@ service to deploy or maintain.
 [![Python](https://img.shields.io/pypi/pyversions/ragbox-core)](https://pypi.org/project/ragbox-core/)
 [![CI](https://github.com/ixchio/ragbox-core/actions/workflows/ci.yml/badge.svg)](https://github.com/ixchio/ragbox-core/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/ixchio/ragbox-core)](LICENSE)
+[![M8ven Score](https://m8ven.ai/badge/mcp/ixchio-ragbox-core-1yjbbk)](https://m8ven.ai/mcp/ixchio-ragbox-core-1yjbbk?s=readme)
+
 
 ## Install it in a project
 
