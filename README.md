@@ -1,7 +1,6 @@
 # RAGBox Core
 
 **Live repository context for coding agents.**
-
 RAGBox indexes a codebase, keeps the index in sync, and gives Claude Code,
 Cursor, and other MCP clients hybrid search, symbol-graph context, and exact
 `file:line-line` citations. It runs as a local sidecar, with no hosted search
@@ -11,8 +10,7 @@ service to deploy or maintain.
 [![Python](https://img.shields.io/pypi/pyversions/ragbox-core)](https://pypi.org/project/ragbox-core/)
 [![CI](https://github.com/ixchio/ragbox-core/actions/workflows/ci.yml/badge.svg)](https://github.com/ixchio/ragbox-core/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/ixchio/ragbox-core)](LICENSE)
-[![M8ven Score](https://m8ven.ai/badge/mcp/ixchio-ragbox-core-1yjbbk)](https://m8ven.ai/mcp/ixchio-ragbox-core-1yjbbk?s=readme)
-
+[![M8ven Score](https://m8ven.ai/badge/mcp/ixchio-ragbox-core-1yjbbk?v=3926bb7d7884ca478236e134baecaa9b)](https://m8ven.ai/mcp/ixchio-ragbox-core-1yjbbk?s=readme)
 
 ## Install it in a project
 
